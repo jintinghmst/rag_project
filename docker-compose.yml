@@ -1,0 +1,26 @@
+# Shared Qdrant for the team.
+#
+# The local data/qdrant store is a locked SQLite file -- one process at a time,
+# so it cannot back several teammates' MCP servers. Run this on a host everyone
+# can reach, load it once, then have each teammate set QDRANT_URL.
+#
+#   docker compose up -d
+#   QDRANT_URL=http://localhost:6333 .venv/Scripts/python scripts/ingest_qdrant.py --recreate
+#
+# QDRANT__SERVICE__API_KEY is read from a .env file next to this one. Qdrant has
+# no user accounts -- that single key is all the access control there is, so keep
+# the container off the public internet (VPN, campus network, or SSH tunnel).
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST + web dashboard at /dashboard
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+
+volumes:
+  qdrant_storage:

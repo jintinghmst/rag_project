@@ -1,0 +1,7 @@
+# install torch first, matched to your CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+numpy<2
+FlagEmbedding
+qdrant-client[fastembed]
+mcp>=2.0
+anthropic

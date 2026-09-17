@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+
+# generated artefacts -- rebuild with scripts/, do not commit
+data/qdrant/
+data/clean/
+data/chunks.jsonl
+
+# shared-Qdrant secret
+.env

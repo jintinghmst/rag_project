@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 import secrets
+import time
 import sys
 import urllib.error
 import urllib.parse
@@ -201,6 +202,34 @@ def main():
     else:
         print(f"   FAIL {st} {body[:200]}\n")
         ok = False
+
+    print("9. real search (cold: loads ~2.8GB of models on first call)")
+    t0 = time.time()
+    st, body, _ = http(f"{base}/mcp", as_json=True, data={
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "search_textbooks",
+                   "arguments": {"query": "what causes far-end crosstalk?", "k": 2}},
+    }, headers=headers)
+    elapsed = time.time() - t0
+    text = ""
+    for line in (body or "").splitlines():
+        if line.startswith("data:"):
+            try:
+                msg = json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                continue
+            content = msg.get("result", {}).get("content") or [{}]
+            text = content[0].get("text", "")
+    if text and "|" in text:
+        print(f"   200  {elapsed:.1f}s  {text.splitlines()[0][:80]}")
+    else:
+        print(f"   FAIL {st} after {elapsed:.1f}s: {str(body)[:200]}")
+        if elapsed > 95:
+            print("        Over ~100s: Cloudflare's free-plan proxy timeout (error 524).")
+            print("        Warm the models with one direct localhost call after starting,")
+            print("        or keep the server running so later calls stay fast.")
+        ok = False
+    print()
 
     print("PASS -- Claude's OAuth flow will work" if ok else "FAIL")
     return 0 if ok else 1

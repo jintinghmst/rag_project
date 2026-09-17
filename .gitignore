@@ -9,3 +9,6 @@ data/chunks.jsonl
 
 # shared-Qdrant secret
 .env
+
+# serve.ps1 saved passphrase
+.serve.local.json

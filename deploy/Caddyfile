@@ -1,0 +1,15 @@
+# Caddy obtains and renews a Let's Encrypt certificate automatically, provided
+# DOMAIN resolves to this host and ports 80 + 443 are reachable from the internet.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# MCP streamable-http keeps a long-lived SSE response open; do not buffer it
+	reverse_proxy mcp:8000 {
+		flush_interval -1
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

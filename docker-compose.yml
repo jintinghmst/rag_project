@@ -21,17 +21,15 @@ services:
       - qdrant_storage:/qdrant/storage
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
-    healthcheck:
-      test: ["CMD", "sh", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
-      interval: 5s
-      timeout: 5s
-      retries: 24
+    # No healthcheck here on purpose. Probing it needs a tool inside the Qdrant
+    # image, and what is in there is not ours to rely on: it has no curl, and its
+    # /bin/sh is dash, which does not support the /dev/tcp trick. The builder
+    # waits for Qdrant itself instead, using the Python in our own image.
 
   builder:
     build: .
     depends_on:
-      qdrant:
-        condition: service_healthy
+      - qdrant
     environment:
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY}
@@ -42,7 +40,7 @@ services:
       - ./data:/app/data
       - ./corpus.json:/app/corpus.json
       - model_cache:/models
-    command: ["python", "/app/rag.py", "build", "--keep-going"]
+    command: ["python", "/app/rag.py", "build", "--keep-going", "--wait", "180"]
     restart: "no"
 
   mcp:

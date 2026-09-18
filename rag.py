@@ -118,8 +118,41 @@ def cmd_setup(args):
 
 # --------------------------------------------------------------------- build
 
+def wait_for_qdrant(seconds):
+    """
+    Block until the Qdrant server answers, or give up with a useful message.
+
+    Compose starts containers in order but does not wait for the service inside
+    one to be ready, and Qdrant takes a few seconds. Waiting here rather than with
+    a compose healthcheck keeps the check inside an image we control: the Qdrant
+    image has no curl, and its /bin/sh is dash, so the usual probes do not work.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = os.environ.get("QDRANT_URL")
+    if not url:
+        return
+    probe = url.rstrip("/") + "/readyz"
+    deadline = time.time() + seconds
+    last = ""
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(probe, timeout=5) as r:
+                if r.status < 500:
+                    return
+        except urllib.error.HTTPError:
+            return  # answering at all is enough; 4xx just means auth or no /readyz
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+        time.sleep(2)
+    sys.exit(f"Qdrant at {url} did not come up within {seconds}s ({last})")
+
+
 def cmd_build(args):
     load_env()
+    if getattr(args, "wait", 0):
+        wait_for_qdrant(args.wait)
     sys.path.insert(0, str(SCRIPTS))
     import chunk_corpus
     import clean_corpus
@@ -553,7 +586,7 @@ def cmd_up(args):
         return subprocess.call([str(VENV_PYTHON), str(ROOT / "rag.py"), "up"])
     rc = cmd_build(argparse.Namespace(
         only=None, engine="pymupdf", force=False, recreate=False,
-        batch=8, no_ingest=False, keep_going=False))
+        batch=8, no_ingest=False, keep_going=False, wait=0))
     if rc:
         return rc
     return cmd_serve(argparse.Namespace(
@@ -583,6 +616,8 @@ def build_parser():
     p.add_argument("--no-ingest", action="store_true", help="stop after chunking")
     p.add_argument("--keep-going", action="store_true",
                    help="index the rest even if a PDF needs OCR")
+    p.add_argument("--wait", type=int, default=0, metavar="SECONDS",
+                   help="wait for QDRANT_URL to answer before building")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("remove", help="drop a document from the index and the registry")

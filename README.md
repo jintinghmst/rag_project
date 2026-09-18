@@ -1,14 +1,3 @@
-# Signal-integrity RAG
-
-A hybrid-retrieval vector index over a shelf of signal-integrity textbooks,
-served to Claude as an MCP connector, plus a terminal chatbot over the same
-index.
-
-Adding a book is dropping a PDF into `original/` and running the build again.
-Nothing in the pipeline is per-book: extraction, front/back-matter trimming,
-cleaning, chunking and ingest are all driven by `corpus.json`, which registers new
-PDFs by itself.
-
 ## Run it
 
 Two ways, both one command. Pick Docker if you want other people to use it;
@@ -200,11 +189,3 @@ it on a VPN or campus network rather than the public internet.
 - The Docker stack has not been run: Docker is not installed on the machine this
   was written on. The native pipeline, both MCP transports, auth and the
   self-tests are verified. Expect to debug the image build once, on the host.
-
-## Licensing
-
-The index holds substantial verbatim text from copyrighted textbooks, including
-one retrieved through a university subscription. A personal local index is one
-thing; an org-wide connector puts that text in front of everyone in the
-organization, which is a different act. Worth settling with your library's
-licensing contact before handing out the URL.

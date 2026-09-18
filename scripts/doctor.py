@@ -215,6 +215,82 @@ def normalize_url(raw):
     return url
 
 
+def get_json(url, timeout=20):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def check_oauth_metadata(endpoint):
+    """
+    The discovery documents Claude's connector UI fetches before it offers a login.
+
+    Everything here must be reachable at the server's PUBLIC hostname, not just on
+    localhost: the URLs inside are absolute, built from MCP_PUBLIC_URL, and the
+    client follows them literally.
+    """
+    base = endpoint.rstrip("/")
+    if base.endswith("/mcp"):
+        base = base[: -len("/mcp")]
+    ok = True
+
+    print("1. server advertises how to sign in (OAuth mode -- no token given)")
+    status, meta = get_json(f"{base}/.well-known/oauth-protected-resource")
+    if status == 200 and isinstance(meta, dict) and meta.get("authorization_servers"):
+        issuer = meta["authorization_servers"][0]
+        print(f"   OK  protected resource -> {issuer}")
+    else:
+        print(f"   FAIL /.well-known/oauth-protected-resource -> {status} {meta}")
+        print("        Claude reports this as \"couldn't determine how this server")
+        print("        signs in\". Check MCP_TEAM_PASSWORD is set and MCP_PUBLIC_URL")
+        print("        matches the hostname you are connecting to.\n")
+        return False
+
+    print("2. its authorization server is usable")
+    status, meta = get_json(f"{base}/.well-known/oauth-authorization-server")
+    if status != 200 or not isinstance(meta, dict):
+        print(f"   FAIL /.well-known/oauth-authorization-server -> {status} {meta}\n")
+        return False
+    missing = [f for f in ("issuer", "authorization_endpoint", "token_endpoint",
+                           "registration_endpoint") if not meta.get(f)]
+    if missing:
+        # without registration_endpoint the UI cannot register itself as a client
+        print(f"   FAIL metadata is missing {missing}\n")
+        return False
+    print(f"   OK  issuer {meta['issuer']}")
+    print(f"       authorize {meta['authorization_endpoint']}")
+    print(f"       register  {meta['registration_endpoint']}")
+    if not meta["issuer"].startswith(base):
+        print(f"   WARN issuer does not match {base} -- set MCP_PUBLIC_URL to the")
+        print("        public hostname, or the login will redirect to the wrong place")
+        ok = False
+
+    print("\n3. the login page loads")
+    req = urllib.request.Request(meta["authorization_endpoint"],
+                                 headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            print(f"   OK  {r.status} from {meta['authorization_endpoint']}")
+    except urllib.error.HTTPError as e:
+        # a bare GET has no client_id, so the server rejecting it is correct --
+        # it proves the endpoint is live and reachable through the tunnel
+        print(f"   OK  {e.code} (rejects a request with no client_id, as it should)")
+    except Exception as e:
+        print(f"   FAIL {type(e).__name__}: {e}\n")
+        return False
+
+    print("\nOAuth metadata is complete -- add the connector in Claude and sign in")
+    print("with MCP_TEAM_PASSWORD. Pass --token to test a bearer-auth deployment")
+    print("end to end instead.")
+    return ok
+
+
 def check_remote(url, token):
     url = normalize_url(url)
     print(f"checking {url}\n")
@@ -236,6 +312,14 @@ def check_remote(url, token):
         print("        '[mcp] streamable-http listening' line on stderr.\n")
         return False
     print(f"   OK  responded with HTTP {status}\n")
+
+    # No token and a 401 is not a failure -- it is what an OAuth deployment is
+    # supposed to do, and OAuth is the mode Claude's connector UI requires. There
+    # is no sign-in to complete from a script, so check the metadata that UI reads
+    # instead: a 401 with no discoverable metadata behind it is exactly the
+    # "couldn't determine how this server signs in" the connector reports.
+    if not token and status == 401:
+        return check_oauth_metadata(url)
 
     if token:
         print("1. unauthenticated request is rejected")

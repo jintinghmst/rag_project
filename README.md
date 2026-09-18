@@ -41,7 +41,8 @@ python rag.py remove <key>                # drop a document from the index
 python rag.py search "why is far-end crosstalk zero in a homogeneous medium?"
 python rag.py chat                        # RAG chatbot (needs ANTHROPIC_API_KEY)
 python rag.py serve --stdio               # MCP for Claude Desktop
-python rag.py serve --tunnel cloudflare   # public HTTPS URL for Claude's connector UI
+python rag.py serve --tunnel cloudflare   # throwaway public HTTPS URL
+python rag.py serve --tunnel cloudflare --name si-rag --domain rag.sipi-lab.org
 python rag.py doctor                      # end-to-end self test
 ```
 

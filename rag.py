@@ -8,7 +8,7 @@ One entry point for the whole project. Works on Windows, macOS and Linux.
     python rag.py search "why is far-end crosstalk zero in a homogeneous medium?"
     python rag.py chat               # RAG chatbot in the terminal
     python rag.py serve              # MCP server for Claude Desktop (stdio)
-    python rag.py serve --tunnel     # public HTTPS URL for Claude's connector UI
+    python rag.py serve --tunnel cloudflare   # public HTTPS URL for Claude's connector
     python rag.py status             # what is registered, built and indexed
     python rag.py doctor             # end-to-end self test
 
@@ -261,36 +261,51 @@ def cmd_chat(args):
 
 # --------------------------------------------------------------------- serve
 
+# A tunnel has two identities that are easy to conflate: the name it is run under
+# and the hostname the public reaches it on. For ngrok a reserved domain is both.
+# For a named Cloudflare tunnel they differ -- `cloudflared tunnel run si-rag` may
+# serve rag.example.edu -- so --name and --domain are separate flags.
 TUNNELS = {
-    # binary, argv builder, regex that finds the public URL in its output
+    # binary, argv builder, regex that finds a quick tunnel's URL in its output
     "cloudflare": (
         "cloudflared",
-        lambda port, domain: (["cloudflared", "tunnel", "run", domain] if domain
-                              else ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"]),
+        # --url on a named tunnel overrides its ingress rules, so the tunnel does
+        # not need a config.yml. Without it, a named tunnel with no config accepts
+        # connections and forwards them nowhere: every request simply times out.
+        lambda port, name: (
+            ["cloudflared", "tunnel", "run", "--url", f"http://localhost:{port}", name]
+            if name else
+            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"]),
         re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com"),
     ),
     "ngrok": (
         "ngrok",
-        lambda port, domain: ["ngrok", "http", str(port), "--log", "stdout"]
-        + (["--domain", domain] if domain else []),
+        lambda port, name: ["ngrok", "http", str(port), "--log", "stdout"]
+        + (["--domain", name] if name else []),
         re.compile(r"https://[a-z0-9.-]+\.(?:ngrok-free\.(?:app|dev)|ngrok\.io|ngrok\.app)"),
     ),
 }
 
 
-def start_tunnel(kind, port, domain, timeout=40):
-    """Start the tunnel first: the server needs its public hostname to accept traffic."""
+def start_tunnel(kind, port, name, domain, timeout=40):
+    """
+    Start the tunnel first: the server needs its public hostname before it binds,
+    to allow that Host header through the SDK's DNS-rebinding protection.
+    """
     binary, argv, url_re = TUNNELS[kind]
     if not shutil.which(binary):
         sys.exit(f"{binary} is not on PATH. Install it, or pass --url if you terminate "
                  "HTTPS yourself.")
-    proc = subprocess.Popen(argv(port, domain), stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                            errors="replace", bufsize=1)
-    # a named tunnel already knows its hostname; only a quick tunnel has to be
-    # scraped out of the log
+    proc = subprocess.Popen(argv(port, name or (domain if kind == "ngrok" else None)),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace", bufsize=1)
+    # a known hostname needs no scraping; only a quick tunnel's random one does
     if domain:
         return proc, f"https://{domain}"
+    if name and kind == "cloudflare":
+        proc.terminate()
+        sys.exit("a named Cloudflare tunnel does not announce its hostname -- pass "
+                 "--domain <hostname> (or --url) so the server knows its public name")
     deadline = time.time() + timeout
     while time.time() < deadline:
         line = proc.stdout.readline()
@@ -320,7 +335,7 @@ def cmd_serve(args):
     if args.url:
         public = args.url if args.url.startswith("http") else f"https://{args.url}"
     elif args.tunnel:
-        tunnel, public = start_tunnel(args.tunnel, args.port, args.domain)
+        tunnel, public = start_tunnel(args.tunnel, args.port, args.name, args.domain)
         print(f"tunnel up: {public}")
     else:
         public = f"http://localhost:{args.port}"
@@ -369,8 +384,8 @@ def cmd_up(args):
     if rc:
         return rc
     return cmd_serve(argparse.Namespace(
-        stdio=False, host="127.0.0.1", port=8000, tunnel=None, domain=None,
-        url=None, no_rerank=False))
+        stdio=False, host="127.0.0.1", port=8000, tunnel=None, name=None,
+        domain=None, url=None, no_rerank=False))
 
 
 # ----------------------------------------------------------------------- cli
@@ -427,7 +442,9 @@ def build_parser():
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--tunnel", choices=sorted(TUNNELS),
                    help="expose it on a public HTTPS URL")
-    p.add_argument("--domain", help="reserved tunnel hostname (ngrok domain, named cf tunnel)")
+    p.add_argument("--name", help="named tunnel to run (cloudflared tunnel name)")
+    p.add_argument("--domain", help="public hostname it serves on (ngrok reserved domain, "
+                                    "or the named tunnel's hostname)")
     p.add_argument("--url", help="public URL you already terminate yourself")
     p.add_argument("--no-rerank", action="store_true", help="faster, worse results")
     p.set_defaults(func=cmd_serve)

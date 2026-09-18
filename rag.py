@@ -24,6 +24,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -287,7 +288,62 @@ TUNNELS = {
 }
 
 
-def start_tunnel(kind, port, name, domain, timeout=40):
+def port_in_use(host, port):
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host if host != "0.0.0.0" else "", int(port)))
+            return False
+        except OSError:
+            return True
+
+
+def port_holders(port):
+    """PID and image name of whatever holds the port, so the message is actionable."""
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
+                             timeout=15).stdout
+        pids = {l.split()[-1] for l in out.splitlines()
+                if f":{port} " in l and "LISTENING" in l}
+        named = []
+        for pid in pids:
+            task = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
+                                  capture_output=True, text=True, timeout=15).stdout
+            name = task.splitlines()[1].split('","')[0].strip('"') if "\n" in task else "?"
+            named.append(f"pid {pid} ({name})")
+        return named or ["unknown"]
+    except Exception:
+        return ["unknown"]
+
+
+def drain(proc, log_path=None):
+    """
+    Keep reading the tunnel's output for the life of the process.
+
+    Not optional. The tunnel logs steadily, and a pipe nobody reads fills after
+    ~64 KB, at which point the tunnel blocks on write and stops forwarding
+    traffic -- a tunnel that works for a while and then silently stops reaching
+    the origin, which looks exactly like the server having crashed.
+    """
+    def pump():
+        handle = open(log_path, "a", encoding="utf-8", errors="replace") if log_path else None
+        try:
+            for line in proc.stdout:
+                if handle:
+                    handle.write(line)
+                    handle.flush()
+        except Exception:
+            pass
+        finally:
+            if handle:
+                handle.close()
+
+    threading.Thread(target=pump, daemon=True).start()
+
+
+def start_tunnel(kind, port, name, domain, timeout=40, log_path=None):
     """
     Start the tunnel first: the server needs its public hostname before it binds,
     to allow that Host header through the SDK's DNS-rebinding protection.
@@ -296,11 +352,21 @@ def start_tunnel(kind, port, name, domain, timeout=40):
     if not shutil.which(binary):
         sys.exit(f"{binary} is not on PATH. Install it, or pass --url if you terminate "
                  "HTTPS yourself.")
+    if kind == "cloudflare" and name:
+        # Two connectors registered for one named tunnel make Cloudflare balance
+        # between them; a stale one with no origin behind it then fails roughly
+        # half of all requests with error 1033.
+        stale = running_tunnels(binary)
+        if stale:
+            print(f"! {binary} is already running (pid {', '.join(stale)}). Stop it first, "
+                  "or it will take half the traffic and answer 1033.")
+
     proc = subprocess.Popen(argv(port, name or (domain if kind == "ngrok" else None)),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             encoding="utf-8", errors="replace", bufsize=1)
     # a known hostname needs no scraping; only a quick tunnel's random one does
     if domain:
+        drain(proc, log_path)
         return proc, f"https://{domain}"
     if name and kind == "cloudflare":
         proc.terminate()
@@ -313,9 +379,24 @@ def start_tunnel(kind, port, name, domain, timeout=40):
             break
         m = url_re.search(line)
         if m:
+            drain(proc, log_path)   # keep draining, for the same reason
             return proc, m.group(0)
     proc.terminate()
     sys.exit(f"{binary} did not report a public URL within {timeout}s")
+
+
+def running_tunnels(binary):
+    """PIDs of an already-running tunnel binary, so a second one is not started blind."""
+    try:
+        if WINDOWS:
+            out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {binary}.exe", "/FO", "CSV"],
+                                 capture_output=True, text=True, timeout=15).stdout
+            return [l.split('","')[1] for l in out.splitlines() if l.startswith(f'"{binary}')]
+        out = subprocess.run(["pgrep", "-x", binary], capture_output=True,
+                             text=True, timeout=15).stdout
+        return out.split()
+    except Exception:
+        return []
 
 
 def cmd_serve(args):
@@ -331,11 +412,24 @@ def cmd_serve(args):
     env["MCP_HOST"] = args.host
     env["MCP_PORT"] = str(args.port)
 
+    log_path = Path(args.log).resolve() if args.log else None
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check the port before starting a tunnel. Otherwise the tunnel comes up, the
+    # server loses the bind race, and the console still says "tunnel up" while the
+    # only evidence of the real failure is an Errno 10048 buried in the log.
+    if port_in_use(args.host, args.port):
+        sys.exit(f"port {args.port} is already in use -- another server is running.\n"
+                 f"Stop it first, or pass --port <n> to run a second one.\n"
+                 + (f"  holder: {', '.join(port_holders(args.port))}\n" if WINDOWS else ""))
+
     tunnel = None
     if args.url:
         public = args.url if args.url.startswith("http") else f"https://{args.url}"
     elif args.tunnel:
-        tunnel, public = start_tunnel(args.tunnel, args.port, args.name, args.domain)
+        tunnel, public = start_tunnel(args.tunnel, args.port, args.name, args.domain,
+                                      log_path=log_path)
         print(f"tunnel up: {public}")
     else:
         public = f"http://localhost:{args.port}"
@@ -349,7 +443,13 @@ def cmd_serve(args):
         print("! no MCP_TEAM_PASSWORD set -- local, unauthenticated")
 
     print(f"\nAdd this in Claude as a custom connector:\n    {public}/mcp\n")
+    if log_path:
+        print(f"logging to {log_path}\n")
     try:
+        if log_path:
+            with log_path.open("a", encoding="utf-8", errors="replace") as fh:
+                return run([VENV_PYTHON, SCRIPTS / "mcp_server.py"], env=env,
+                           stdout=fh, stderr=subprocess.STDOUT)
         return run([VENV_PYTHON, SCRIPTS / "mcp_server.py"], env=env)
     except KeyboardInterrupt:
         return 0
@@ -360,6 +460,79 @@ def cmd_serve(args):
                 tunnel.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 tunnel.kill()
+
+
+# ------------------------------------------------------------------ autostart
+
+TASK_NAME = "SignalIntegrityRAG"
+
+
+def cmd_autostart(args):
+    """
+    Keep the connector up without a terminal window babysitting it.
+
+    A connector is only reachable while the server runs, and a stable URL is no
+    use if the process behind it dies with the shell that started it. On Windows
+    this registers a logon task; elsewhere it prints the systemd unit to install,
+    since a user service there needs a file, not a command.
+    """
+    serve = [str(VENV_PYTHON.with_name("pythonw.exe") if WINDOWS else VENV_PYTHON),
+             str(ROOT / "rag.py"), "serve", "--log", str(ROOT / "data" / "serve.log")]
+    for flag in ("tunnel", "name", "domain", "url"):
+        value = getattr(args, flag, None)
+        if value:
+            serve += [f"--{flag}", value]
+
+    if not WINDOWS:
+        unit = (
+            "[Unit]\nDescription=Signal-integrity RAG MCP server\nAfter=network-online.target\n\n"
+            f"[Service]\nWorkingDirectory={ROOT}\nExecStart={' '.join(serve)}\n"
+            "Restart=always\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n")
+        print(f"Save this as ~/.config/systemd/user/{TASK_NAME}.service, then:\n"
+              f"  systemctl --user daemon-reload && systemctl --user enable --now {TASK_NAME}\n")
+        print(unit)
+        return 0
+
+    # The Startup folder, not a scheduled task: `schtasks /SC ONLOGON` needs an
+    # elevated shell, and needing admin to run your own retrieval server is a poor
+    # trade for what this is.
+    startup = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup"
+    script = startup / f"{TASK_NAME}.cmd"
+
+    if args.remove:
+        script.unlink(missing_ok=True)
+        print(f"removed {script}")
+        return 0
+
+    if args.status:
+        if not script.exists():
+            print("autostart is not installed")
+            return 1
+        print(f"{script}:\n")
+        print(script.read_text(encoding="utf-8"))
+        return 0
+
+    if not (args.tunnel or args.url):
+        sys.exit("autostart needs the public URL it should serve on, e.g.\n"
+                 "  python rag.py autostart --tunnel cloudflare --name si-rag "
+                 "--domain rag.example.org")
+
+    quoted = " ".join(f'"{part}"' if " " in part else part for part in serve)
+    startup.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "@echo off\r\n"
+        f"cd /d \"{ROOT}\"\r\n"
+        # pythonw keeps it windowless; start lets the logon sequence carry on
+        f"start \"\" {quoted}\r\n",
+        encoding="utf-8")
+
+    print(f"\ninstalled {script}")
+    print("it starts at every logon, with no window.")
+    print(f"  start now : {script}")
+    print(f"  stop      : taskkill /F /IM pythonw.exe /IM cloudflared.exe")
+    print(f"  remove    : python rag.py autostart --remove")
+    print(f"  logs      : {ROOT / 'data' / 'serve.log'}")
+    return 0
 
 
 # -------------------------------------------------------------------- doctor
@@ -385,7 +558,7 @@ def cmd_up(args):
         return rc
     return cmd_serve(argparse.Namespace(
         stdio=False, host="127.0.0.1", port=8000, tunnel=None, name=None,
-        domain=None, url=None, no_rerank=False))
+        domain=None, url=None, no_rerank=False, log=None))
 
 
 # ----------------------------------------------------------------------- cli
@@ -447,7 +620,18 @@ def build_parser():
                                     "or the named tunnel's hostname)")
     p.add_argument("--url", help="public URL you already terminate yourself")
     p.add_argument("--no-rerank", action="store_true", help="faster, worse results")
+    p.add_argument("--log", help="append server and tunnel output to this file")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("autostart",
+                       help="keep the server running at logon, without a terminal")
+    p.add_argument("--tunnel", choices=sorted(TUNNELS))
+    p.add_argument("--name", help="named tunnel to run")
+    p.add_argument("--domain", help="public hostname it serves on")
+    p.add_argument("--url", help="public URL you already terminate yourself")
+    p.add_argument("--status", action="store_true", help="show the registered task")
+    p.add_argument("--remove", action="store_true", help="unregister it")
+    p.set_defaults(func=cmd_autostart)
 
     p = sub.add_parser("doctor", help="end-to-end self test")
     p.add_argument("--url", help="check a deployed endpoint instead of a local stdio server")

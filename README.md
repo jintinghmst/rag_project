@@ -117,6 +117,11 @@ table captions into the middle of sentences ("...cause the per-unit-" / *FIGURE
 3.3 ...* / "length resistance matrix..."). Caption blocks are moved to the end of
 their page so the sentence rejoins — ~1180 of them across the current three books.
 
+## Hosting it
+
+`HOSTING.md` is the full runbook: picking a mode, tunnels, secrets, verification,
+operations and a troubleshooting table. The short version follows.
+
 ## Use it from Claude
 
 Three tools, in both stdio and remote modes:

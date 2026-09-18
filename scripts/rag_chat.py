@@ -1,9 +1,9 @@
 """
-RAG chatbot over the signal-integrity textbooks.
+RAG chatbot over the indexed textbooks.
 
-    python scripts/rag_chat.py                          # interactive
-    python scripts/rag_chat.py "what sets Z0 of a stripline?"   # one-shot
-    python scripts/rag_chat.py --book hall_asi -k 8
+    python rag.py chat                                  # interactive
+    python rag.py chat "what sets Z0 of a stripline?"    # one-shot
+    python rag.py chat --book hall_asi -k 8
 
 Each turn: rewrite the question to stand alone (follow-ups like "and for
 stripline?" retrieve nothing on their own), retrieve with hybrid search +
@@ -38,7 +38,7 @@ the sources.
 garbled. Never transcribe a formula as if it were authoritative: state the \
 relationship in words, and point the student at the cited page to read the real \
 equation. If a passage's math is unreadable, say that.
-- Where the three books differ in notation or approach, say which book you are \
+- Where the sources differ in notation or approach, say which book you are \
 following.
 - Be direct and technical. The reader knows electromagnetics."""
 
@@ -142,7 +142,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("question", nargs="?", help="ask once and exit")
     ap.add_argument("-k", type=int, default=6, help="passages to send to Claude")
-    ap.add_argument("--book", default=None, help="paul_mtl | hall_asi | dsi_mod")
+    ap.add_argument("--book", default=None,
+                    help="restrict to one document key (see `rag.py status`)")
     ap.add_argument("--no-rerank", dest="rerank", action="store_false")
     ap.add_argument("--no-stream", dest="stream", action="store_false")
     args = ap.parse_args()

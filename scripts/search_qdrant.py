@@ -1,10 +1,13 @@
 """
-Hybrid retrieval over the local Qdrant store, with optional cross-encoder rerank.
+Hybrid retrieval over the Qdrant store, with optional cross-encoder rerank.
 
 Dense and sparse candidate lists are fused with reciprocal rank fusion inside
 Qdrant, then (by default) reranked with BAAI/bge-reranker-v2-m3. On a corpus of
-three books that all cover crosstalk, impedance and loss in near-identical
-language, the reranker is what separates the right chapter from a plausible one.
+books that all cover the same subject in near-identical language, the reranker is
+what separates the right chapter from a plausible one.
+
+`search()` is importable and returns hits with full metadata -- that is the
+function to wire into anything else.
 
     python scripts/search_qdrant.py "what causes far-end crosstalk?"
     python scripts/search_qdrant.py "skin effect resistance" --book hall_asi -k 5
@@ -15,12 +18,14 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-QDRANT_PATH = ROOT / "data" / "qdrant"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corpus  # noqa: E402
 
-MODEL_NAME = "BAAI/bge-m3"
-RERANKER_NAME = "BAAI/bge-reranker-v2-m3"
-COLLECTION = "signal_integrity"
+_cfg = corpus.load()
+QDRANT_PATH = corpus.QDRANT_PATH
+MODEL_NAME = _cfg["embed_model"]
+RERANKER_NAME = _cfg["rerank_model"]
+COLLECTION = os.environ.get("RAG_COLLECTION", _cfg["collection"])
 
 _model = None
 _reranker = None
@@ -40,6 +45,31 @@ def get_reranker():
         from FlagEmbedding import FlagReranker
         _reranker = FlagReranker(RERANKER_NAME, use_fp16=True)
     return _reranker
+
+
+def list_documents(client=None):
+    """
+    What the index actually holds: [{book, title, chunks}], newest state wins.
+
+    Read from the manifest the ingest writes beside the collection rather than
+    from corpus.json, so a server pointed at a shared Qdrant reports what is
+    really searchable instead of what some other machine's registry says.
+    """
+    owns = client is None
+    client = client or get_client()
+    try:
+        name = f"{COLLECTION}__manifest"
+        if client.collection_exists(name):
+            points, _ = client.scroll(collection_name=name, limit=1000, with_payload=True)
+            rows = [{"book": p.payload["key"], "title": p.payload.get("title", ""),
+                     "chunks": p.payload.get("chunks", 0)} for p in points]
+            if rows:
+                return sorted(rows, key=lambda r: r["book"])
+        return [{"book": k, "title": d["title"], "chunks": d.get("chunks", 0)}
+                for k, d in sorted(corpus.load()["documents"].items())]
+    finally:
+        if owns:
+            client.close()
 
 
 def get_client():
@@ -133,7 +163,7 @@ def main():
     ap.add_argument("query")
     ap.add_argument("-k", type=int, default=5)
     ap.add_argument("--candidates", type=int, default=30)
-    ap.add_argument("--book", default=None, help="paul_mtl | hall_asi | dsi_mod")
+    ap.add_argument("--book", default=None, help="restrict to one document key")
     ap.add_argument("--no-rerank", dest="rerank", action="store_false")
     ap.add_argument("--full", action="store_true", help="print the whole chunk")
     args = ap.parse_args()

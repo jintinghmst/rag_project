@@ -1,9 +1,9 @@
 """
-Clean the three signal-integrity textbook .txt extractions for RAG ingestion.
+Stage 2: extracted/<key>.txt -> data/clean/<key>.txt, ready for chunking.
 
-Per book:
-  1. drop front matter (table of contents) and back matter (index)
-  2. strip the per-page Wiley download banner
+Per document:
+  1. drop front matter (table of contents) and back matter (index), by page
+  2. strip per-page publisher banners (corpus.json: banner_patterns)
   3. strip running headers / footers and bare folio numbers around [PAGE n]
   4. normalize unicode (ligatures, smart quotes, nbsp, soft hyphen)
   5. repair line-break hyphenation, using corpus evidence to decide whether the
@@ -11,36 +11,25 @@ Per book:
   6. reflow hard-wrapped prose into paragraphs, leaving equation lines alone
   7. drop pure-punctuation junk lines and collapse blank runs
 
+Nothing here is per-book. The only document-specific inputs are `skip_pages` and
+`body_end_page` in corpus.json, expressed as page numbers so they survive a
+re-extraction with a different engine. Both are auto-detected for a document that
+has not set them, and the guess is written back for you to correct.
+
 [PAGE n] markers are preserved: the chunker uses them for page citations and
 strips them before embedding.
 """
+import argparse
 import re
+import sys
 import unicodedata
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "training"
-DST = ROOT / "data" / "clean"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corpus  # noqa: E402
 
-# line ranges are 1-based and inclusive, verified by inspection of each file
-BOOKS = {
-    "clayton_paul_multiconductor_transmission_lines.txt": {
-        "drop_ranges": [(68, 528)],   # table of contents
-        "truncate_at": 49605,         # [PAGE 796] -> INDEX
-    },
-    "hall_advanced_signal_integrity.txt": {
-        "drop_ranges": [(68, 484)],   # table of contents
-        "truncate_at": 45532,         # [PAGE 662] -> INDEX
-    },
-    "digital_signal_integrity_modeling_simulation.txt": {
-        "drop_ranges": [],            # no front matter in the extraction
-        "truncate_at": 21510,         # [PAGE 536] -> Index
-    },
-}
-
-PAGE_RE = re.compile(r"^\[PAGE (\d+)\]$")
-BANNER_RE = re.compile(r"Downloaded from https://onlinelibrary\.wiley\.com")
+PAGE_RE = corpus.PAGE_RE
 ROMAN_RE = re.compile(r"^[ivxlcdm]{1,7}$", re.I)
 FOLIO_RE = re.compile(r"^\d{1,4}$")
 # "520 Sample Layer Peeling Code Appendix E" / "2 Signal Integrity Chapter 5"
@@ -261,22 +250,58 @@ def collapse_blanks(lines):
     return out
 
 
-def process(name, cfg):
-    raw = (SRC / name).read_text(encoding="utf-8", errors="replace")
+def trim_matter(lines, skip_pages, end_page):
+    """Drop whole pages: the contents block(s), and everything from the index on."""
+    skip = set()
+    for a, b in skip_pages or []:
+        skip.update(range(int(a), int(b) + 1))
+    out, page, dropped = [], None, 0
+    for line in lines:
+        m = PAGE_RE.match(line.strip())
+        if m:
+            page = int(m.group(1))
+            if end_page is not None and page >= int(end_page):
+                dropped += 1
+                break
+        if page in skip:
+            dropped += 1
+            continue
+        out.append(line)
+    return out, dropped
+
+
+def resolve_matter(key, doc, text, redetect=False):
+    """Fill in skip_pages / body_end_page for a document that has not set them."""
+    auto = set(doc.get("auto") or [])
+    want_front = "skip_pages" in auto and (redetect or not doc.get("skip_pages"))
+    want_end = "body_end_page" in auto and (redetect or doc.get("body_end_page") is None)
+    if not (want_front or want_end):
+        return False
+    front, end = corpus.detect_matter(text)
+    if want_front:
+        doc["skip_pages"] = front
+    if want_end:
+        doc["body_end_page"] = end
+    print(f"  {key}: detected contents {doc.get('skip_pages')}, "
+          f"index starts p{doc.get('body_end_page')} "
+          f"-- correct these in corpus.json if wrong")
+    return True
+
+
+def process(key, doc, banner_re):
+    src = corpus.doc_paths(key, doc)["text"]
+    raw = src.read_text(encoding="utf-8", errors="replace")
     header = [l for l in raw.split("\n")[:3] if l.startswith("#")]
     lines = raw.split("\n")
     n_in = len(lines)
 
-    drop = set()
-    for a, b in cfg["drop_ranges"]:
-        drop.update(range(a - 1, b))
-    cut = cfg["truncate_at"] - 1
-    lines = [l for i, l in enumerate(lines) if i < cut and i not in drop]
-    after_matter = len(lines)
+    lines, n_matter = trim_matter(lines, doc.get("skip_pages"), doc.get("body_end_page"))
 
     lines = [normalize(l) for l in lines]
-    n_banner = sum(bool(BANNER_RE.search(l)) for l in lines)
-    lines = [l for l in lines if not BANNER_RE.search(l)]
+    n_banner = 0
+    if banner_re is not None:
+        n_banner = sum(bool(banner_re.search(l)) for l in lines)
+        lines = [l for l in lines if not banner_re.search(l)]
 
     headers = find_running_headers(lines)
     lines, n_furniture = strip_page_furniture(lines, headers)
@@ -294,12 +319,13 @@ def process(name, cfg):
     out = ("\n".join(header)
            + "\n# CLEANED: matter trimmed, banners/headers removed, reflowed\n\n"
            + body)
-    (DST / name).write_text(out, encoding="utf-8")
+    corpus.CLEAN_DIR.mkdir(parents=True, exist_ok=True)
+    corpus.doc_paths(key, doc)["clean"].write_text(out, encoding="utf-8")
 
     return {
-        "book": name,
+        "book": key,
         "lines_in": n_in,
-        "matter_dropped": n_in - after_matter,
+        "matter_dropped": n_matter,
         "banners": n_banner,
         "furniture": n_furniture,
         "captions_moved": n_captions,
@@ -311,12 +337,66 @@ def process(name, cfg):
     }
 
 
-if __name__ == "__main__":
-    DST.mkdir(parents=True, exist_ok=True)
-    rows = [process(n, c) for n, c in BOOKS.items()]
+def clean_signature(doc):
+    """What a re-clean depends on: the extracted text and the trim settings."""
+    return "|".join(str(doc.get(k)) for k in ("text_hash", "skip_pages", "body_end_page"))
+
+
+def run(keys=None, force=False, redetect=False, quiet=False):
+    """Clean every document whose text or trim settings changed. Returns stat rows."""
+    cfg = corpus.load()
+    banners = [p for p in cfg.get("banner_patterns") or [] if p]
+    banner_re = re.compile("|".join(f"(?:{p})" for p in banners)) if banners else None
+
+    rows, skipped, dirty = [], [], False
+    for key, doc in cfg["documents"].items():
+        if keys and key not in keys:
+            continue
+        paths = corpus.doc_paths(key, doc)
+        if not paths["text"].exists():
+            continue
+        text = paths["text"].read_text(encoding="utf-8", errors="replace")
+        dirty |= resolve_matter(key, doc, text, redetect)
+        digest = corpus.file_hash(paths["text"])
+        if doc.get("text_hash") != digest:
+            doc["text_hash"] = digest
+            dirty = True
+
+        sig = clean_signature(doc)
+        if not force and paths["clean"].exists() and doc.get("clean_sig") == sig:
+            skipped.append(key)
+            continue
+        if not quiet:
+            print(f"  cleaning {key}", flush=True)
+        rows.append(process(key, doc, banner_re))
+        doc["clean_sig"] = sig
+        dirty = True
+
+    if dirty:
+        corpus.save(cfg)
+    return cfg, rows, skipped
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--only", nargs="*", help="document keys to clean")
+    ap.add_argument("--force", action="store_true", help="re-clean even if unchanged")
+    ap.add_argument("--redetect", action="store_true",
+                    help="re-run front/back matter detection, overwriting auto values")
+    args = ap.parse_args()
+
+    _, rows, skipped = run(args.only, args.force, args.redetect)
+    if skipped:
+        print(f"unchanged: {', '.join(skipped)}")
+    if not rows:
+        return
     w = max(len(r["book"]) for r in rows)
     cols = ["lines_in", "matter_dropped", "banners", "furniture", "captions_moved",
             "hyphens_joined", "junk", "lines_out", "words_out", "pages"]
     print("book".ljust(w) + " " + " ".join(c.rjust(14) for c in cols))
     for r in rows:
         print(r["book"].ljust(w) + " " + " ".join(str(r[c]).rjust(14) for c in cols))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,7 +1,10 @@
-# install torch first, matched to your CUDA:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# `python rag.py setup` installs torch first, matched to the machine, then this
+# file. Installing it by hand instead:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu   (or cu124)
+#   pip install -r requirements.txt
 numpy<2
-FlagEmbedding
+PyMuPDF            # PDF text extraction, no poppler/system dependency
+FlagEmbedding      # bge-m3 embeddings + bge-reranker cross-encoder
 qdrant-client[fastembed]
 mcp>=2.0
-anthropic
+anthropic          # only for `rag.py chat`

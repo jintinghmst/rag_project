@@ -1,4 +1,17 @@
 {
+  "_comment": [
+    "Merge this into your Claude Desktop config and restart the app.",
+    "Windows: %APPDATA%\\Claude\\claude_desktop_config.json",
+    "macOS:   ~/Library/Application Support/Claude/claude_desktop_config.json",
+    "",
+    "Replace the two paths with this repo's absolute location. Claude Desktop does",
+    "not run the server with the repo as its working directory, and the venv's",
+    "python must be spelled out -- a bare `python` has none of the dependencies.",
+    "On macOS/Linux the interpreter is .venv/bin/python.",
+    "",
+    "To query a shared Qdrant instead of the local data/qdrant, add QDRANT_URL and",
+    "QDRANT_API_KEY to the env block."
+  ],
   "mcpServers": {
     "signal-integrity-books": {
       "command": "D:\\phd\\rag_project\\.venv\\Scripts\\python.exe",

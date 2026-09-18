@@ -1,0 +1,16 @@
+# Keep the committed corpus text byte-identical across platforms. The build
+# caches on content hashes, and a checkout that rewrote CRLF would invalidate
+# every one of them on a fresh clone.
+*.txt   text eol=lf
+*.json  text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.sh    text eol=lf
+Dockerfile text eol=lf
+Caddyfile  text eol=lf
+
+# .ps1 stays CRLF: some Windows PowerShell hosts mis-parse LF-only scripts.
+*.ps1   text eol=crlf
+
+*.pdf   binary

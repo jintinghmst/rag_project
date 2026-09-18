@@ -1,0 +1,68 @@
+{
+  "collection": "signal_integrity",
+  "embed_model": "BAAI/bge-m3",
+  "rerank_model": "BAAI/bge-reranker-v2-m3",
+  "banner_patterns": [
+    "Downloaded from https://onlinelibrary\\.wiley\\.com"
+  ],
+  "documents": {
+    "paul_mtl": {
+      "pdf": "(Wiley Series in Microwave & Optical Engineering) Clayton R. Paul-Analysis of Multiconductor Transmission Lines, 2E (Wiley Series in Microwave & Optical Engineering)-Wiley-IEEE Press (2007).pdf",
+      "title": "Paul, Analysis of Multiconductor Transmission Lines (2e)",
+      "slot": 0,
+      "text": "paul_mtl.txt",
+      "skip_pages": [
+        [
+          9,
+          18
+        ]
+      ],
+      "body_end_page": 796,
+      "auto": [],
+      "text_hash": "b6cd51cd0fb1b010eae3aa0bba863722",
+      "clean_sig": "b6cd51cd0fb1b010eae3aa0bba863722|[[9, 18]]|796",
+      "chunk_sig": "b6cd51cd0fb1b010eae3aa0bba863722|[[9, 18]]|796|Paul, Analysis of Multiconductor Transmission Lines (2e)|0",
+      "chunks": 1043,
+      "pdf_hash": "64716cbf7a1cd2f5fc0c8fa3117a77be"
+    },
+    "hall_asi": {
+      "pdf": "Advanced Signal Integrity for High‐Speed Digital Designs - 2008 - Hall.pdf",
+      "title": "Hall & Heck, Advanced Signal Integrity for High-Speed Digital Designs",
+      "slot": 1,
+      "text": "hall_asi.txt",
+      "skip_pages": [
+        [
+          4,
+          12
+        ]
+      ],
+      "body_end_page": 662,
+      "auto": [],
+      "text_hash": "789de29d5c543674d524ba5595ae2c16",
+      "clean_sig": "789de29d5c543674d524ba5595ae2c16|[[4, 12]]|662",
+      "chunk_sig": "789de29d5c543674d524ba5595ae2c16|[[4, 12]]|662|Hall & Heck, Advanced Signal Integrity for High-Speed Digital Designs|1",
+      "chunks": 902,
+      "pdf_hash": "7c046f4242575c1b9c7bdd0f7ce97b7b"
+    },
+    "dsi_mod": {
+      "pdf": "digital-signal-integrity-modeling-and-simulation-with-interconnects-and-package_compress.pdf",
+      "title": "Digital Signal Integrity: Modeling and Simulation with Interconnects and Packages",
+      "slot": 2,
+      "text": "dsi_mod.txt",
+      "skip_pages": [
+        [
+          3,
+          12
+        ]
+      ],
+      "body_end_page": 535,
+      "note": "scanned + OCR'd; extracted/dsi_mod.txt is hand-OCR output, not re-extractable from the PDF",
+      "auto": [],
+      "text_hash": "7dbb40c0c3442fadcb5e9d3bb2f6e03f",
+      "clean_sig": "7dbb40c0c3442fadcb5e9d3bb2f6e03f|[[3, 12]]|535",
+      "chunk_sig": "7dbb40c0c3442fadcb5e9d3bb2f6e03f|[[3, 12]]|535|Digital Signal Integrity: Modeling and Simulation with Interconnects and Packages|2",
+      "chunks": 530,
+      "pdf_hash": "1f375f3f1147a9a620741823da134b86"
+    }
+  }
+}

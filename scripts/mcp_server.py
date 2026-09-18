@@ -1,5 +1,5 @@
 """
-MCP server exposing the signal-integrity textbook corpus to Claude Desktop.
+MCP server exposing the indexed textbook corpus to Claude.
 
 Tools:
   search_textbooks  hybrid retrieval + cross-encoder rerank, returns cited passages
@@ -39,8 +39,9 @@ import search_qdrant as sq  # noqa: E402
 
 RERANK = os.environ.get("RAG_RERANK", "1") != "0"
 
-# Remote deployments must set MCP_AUTH_TOKEN. stdio deployments (Claude Desktop)
-# leave it unset -- the transport is a local pipe, there is nothing to authenticate.
+# A remote deployment must set MCP_TEAM_PASSWORD (OAuth, what Claude's connector
+# UI requires) or MCP_AUTH_TOKEN (bearer, for scripted clients). stdio deployments
+# leave both unset -- the transport is a local pipe, there is nothing to authenticate.
 AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN") or None
 PUBLIC_URL = os.environ.get("MCP_PUBLIC_URL", "http://localhost:8000")
 
@@ -51,11 +52,23 @@ def quiet():
     with contextlib.redirect_stdout(sys.stderr):
         yield
 
-BOOKS = {
-    "paul_mtl": "Paul, Analysis of Multiconductor Transmission Lines (2e), 2008",
-    "hall_asi": "Hall & Heck, Advanced Signal Integrity for High-Speed Digital Designs, 2009",
-    "dsi_mod": "Digital Signal Integrity: Modeling and Simulation with Interconnects and Packages",
-}
+def books():
+    """
+    {key: title} for whatever is indexed right now, cached after the first call.
+
+    Read from the index rather than hardcoded, so adding a document to the corpus
+    needs no edit here -- and so a server sharing someone else's Qdrant advertises
+    what that server holds.
+    """
+    global _books
+    if _books is None:
+        with quiet():
+            _books = {d["book"]: d["title"] for d in sq.list_documents(client())}
+    return _books
+
+
+_books = None
+
 
 class StaticTokenVerifier:
     """
@@ -138,8 +151,8 @@ server = MCPServer(
     log_level="ERROR",
     **_auth_kwargs(),
     instructions=(
-        "A retrieval index over three signal-integrity / high-speed digital design "
-        "textbooks. Use search_textbooks to ground answers about transmission lines, "
+        "A retrieval index over a shelf of signal-integrity / high-speed digital "
+        "design textbooks. Use search_textbooks to ground answers about transmission lines, "
         "crosstalk, impedance, losses, equalization, jitter, S-parameters and related "
         "topics, and cite the book, section and page returned with each passage.\n\n"
         "The passages come from PDF text extraction and OCR. Prose is reliable; "
@@ -161,10 +174,11 @@ def client():
 
 @server.tool(
     description=(
-        "Search three signal-integrity textbooks and return the most relevant "
+        "Search the signal-integrity textbook corpus and return the most relevant "
         "passages with book, section and page citations. Use for any question about "
         "transmission lines, crosstalk, impedance, conductor/dielectric losses, "
-        "equalization, jitter, S-parameters, or PCB/package interconnect behaviour."
+        "equalization, jitter, S-parameters, or PCB/package interconnect behaviour. "
+        "Call list_books first if you want to restrict the search to one book."
     )
 )
 def search_textbooks(query: str, k: int = 6, book: str | None = None) -> str:
@@ -173,12 +187,11 @@ def search_textbooks(query: str, k: int = 6, book: str | None = None) -> str:
         query: A natural-language question or topic. Full sentences work better
             than keywords.
         k: How many passages to return (1-15).
-        book: Optional filter -- "paul_mtl", "hall_asi" or "dsi_mod". Omit to
-            search all three.
+        book: Optional filter -- a book key from list_books. Omit to search all.
     """
     k = max(1, min(int(k), 15))
-    if book and book not in BOOKS:
-        return f"Unknown book {book!r}. Valid values: {', '.join(BOOKS)}."
+    if book and book not in books():
+        return f"Unknown book {book!r}. Valid values: {', '.join(books())}."
 
     with quiet():
         hits = sq.search(query, k=k, candidates=max(30, k * 5), book=book,
@@ -275,19 +288,8 @@ if oauth_provider is not None:
 @server.tool(description="List the books in the corpus and their coverage.")
 def list_books() -> str:
     """Returns each book key, full title and indexed chunk count."""
-    from qdrant_client import models
-
-    rows = []
-    for key, title in BOOKS.items():
-        with quiet():
-            n = client().count(
-                collection_name=sq.COLLECTION,
-                count_filter=models.Filter(
-                    must=[models.FieldCondition(key="book", match=models.MatchValue(value=key))]
-                ),
-                exact=True,
-            ).count
-        rows.append({"book": key, "title": title, "chunks": n})
+    with quiet():
+        rows = sq.list_documents(client())
     return json.dumps(rows, indent=2)
 
 

@@ -2,13 +2,12 @@
 __pycache__/
 *.pyc
 
-# generated artefacts -- rebuild with scripts/, do not commit
-data/qdrant/
-data/clean/
-data/chunks.jsonl
+# build artefacts -- rebuild with `python rag.py build`, do not commit
+data/
 
-# shared-Qdrant secret
+# secrets: QDRANT_API_KEY, MCP_TEAM_PASSWORD, ANTHROPIC_API_KEY
 .env
 
-# serve.ps1 saved passphrase
-.serve.local.json
+# extracted/ IS committed: it is the cached PDF text every later stage was tuned
+# against, and one book's copy is OCR output that cannot be regenerated from its
+# scanned PDF.

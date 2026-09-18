@@ -2,6 +2,10 @@
 # short sequence -- it does not need one. The ~2.8 GB of model weights are NOT
 # baked in; they download on first run into a mounted volume (see compose), so
 # the image stays small and the weights survive a rebuild.
+#
+# One image serves both roles in the stack: the `builder` service runs the
+# ingest pipeline and exits, the `mcp` service serves. Same code, same versions,
+# so an index can never be built by a different release than the one querying it.
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -10,7 +14,8 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HUB_DISABLE_PROGRESS_BARS=1 \
     TRANSFORMERS_VERBOSITY=error \
     TOKENIZERS_PARALLELISM=false \
-    OMP_NUM_THREADS=4
+    OMP_NUM_THREADS=4 \
+    RAG_NO_REEXEC=1
 
 WORKDIR /app
 
@@ -21,20 +26,18 @@ RUN apt-get update \
 # torch first, from the CPU index -- otherwise pip pulls the CUDA build (~2.5 GB)
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.6.0
 
-RUN pip install \
-      "numpy<2" \
-      FlagEmbedding \
-      "qdrant-client[fastembed]" \
-      "mcp>=2.0"
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt
 
 COPY scripts/ /app/scripts/
+COPY rag.py corpus.json /app/
 
-# fail fast if the deployment forgot the shared secret
+# fail fast if a network deployment forgot its shared secret
 RUN printf '%s\n' \
   '#!/bin/sh' \
   'set -e' \
-  'if [ -z "$MCP_AUTH_TOKEN" ]; then' \
-  '  echo "refusing to start: MCP_AUTH_TOKEN is unset (the endpoint would be open)" >&2' \
+  'if [ -z "$MCP_AUTH_TOKEN" ] && [ -z "$MCP_TEAM_PASSWORD" ]; then' \
+  '  echo "refusing to start: set MCP_TEAM_PASSWORD or MCP_AUTH_TOKEN (the endpoint would be open)" >&2' \
   '  exit 1' \
   'fi' \
   'exec python /app/scripts/mcp_server.py' \

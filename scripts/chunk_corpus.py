@@ -1,5 +1,5 @@
 """
-Section-aware chunking of the cleaned textbooks into data/chunks.jsonl.
+Stage 3: data/clean/<key>.txt -> data/chunks/<key>.jsonl.
 
 Chunks never cross a section boundary. Within a section, paragraphs are packed
 up to TARGET_TOKENS (measured with the bge-m3 tokenizer) with a paragraph-level
@@ -7,49 +7,39 @@ overlap, so a derivation and the equation it refers to tend to stay together.
 
 Each chunk carries book / chapter / section / page-range metadata for citation
 and for metadata-filtered retrieval. The embedded text is prefixed with a short
-provenance header, which measurably helps retrieval on a corpus where three
+provenance header, which measurably helps retrieval on a corpus where several
 books discuss the same concepts in near-identical language.
+
+Chunk ids are allocated from the document's own block (corpus.py: ID_STRIDE), so
+adding or re-chunking one book never renumbers another -- which matters because
+read_context() reaches neighbouring passages by id arithmetic, and because the
+ingest replaces one book's points without touching the rest.
 """
+import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "data" / "clean"
-OUT = ROOT / "data" / "chunks.jsonl"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corpus  # noqa: E402
 
-MODEL_NAME = "BAAI/bge-m3"
 TARGET_TOKENS = 450
 MAX_TOKENS = 800
 MIN_TOKENS = 40
 OVERLAP_TOKENS = 80
 
-BOOKS = {
-    "clayton_paul_multiconductor_transmission_lines.txt": {
-        "short": "Paul, Analysis of Multiconductor Transmission Lines (2e)",
-        "key": "paul_mtl",
-    },
-    "hall_advanced_signal_integrity.txt": {
-        "short": "Hall & Heck, Advanced Signal Integrity for High-Speed Digital Designs",
-        "key": "hall_asi",
-    },
-    "digital_signal_integrity_modeling_simulation.txt": {
-        "short": "Digital Signal Integrity: Modeling and Simulation with Interconnects and Packages",
-        "key": "dsi_mod",
-    },
-}
-
-PAGE_RE = re.compile(r"^\[PAGE (\d+)\]$")
+PAGE_RE = corpus.PAGE_RE
 # "3.4.6 Field Mapping" / "1.2 THE PROBLEM" -- but not a contents line ending in a
 # folio, and not a numeric data row that happens to start "83.61 ..."
 HEADING_RE = re.compile(r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{1,2}))?\s+([A-Z].{3,90})$")
 MAX_CHAPTER = 20
 
 
-def load_tokenizer():
+def load_tokenizer(model_name):
     try:
         from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(MODEL_NAME)
+        return AutoTokenizer.from_pretrained(model_name)
     except Exception as exc:  # fall back to a rough estimate so chunking still runs
         print(f"! tokenizer unavailable ({exc.__class__.__name__}); using word-count estimate")
         return None
@@ -191,51 +181,99 @@ def split_long(text, count):
     return [o for o in out if o.strip()]
 
 
+def chunk_document(key, doc, count):
+    """All chunks for one document, ids allocated from its own block."""
+    sections = parse_sections(corpus.doc_paths(key, doc)["clean"])
+    base, ceiling = corpus.id_range(doc)
+    title = doc["title"]
+    records, cid = [], base
+
+    for sec in sections:
+        label = f"Section {sec['section']} {sec['title']}" if sec["section"] else sec["title"]
+        header = f"[{title} | {label}]"
+        for ch in pack(sec["blocks"], count, header):
+            if ch["n_tokens"] < MIN_TOKENS:
+                continue
+            if cid >= ceiling:
+                raise RuntimeError(
+                    f"{key}: more than {corpus.ID_STRIDE} chunks -- raise ID_STRIDE "
+                    "in scripts/corpus.py and rebuild the whole index")
+            records.append({
+                "id": cid,
+                "book": key,
+                "book_title": title,
+                "chapter": sec["chapter"],
+                "section": sec["section"],
+                "section_title": sec["title"],
+                "page_start": ch["page_start"],
+                "page_end": ch["page_end"],
+                "n_tokens": ch["n_tokens"],
+                "text": ch["text"],
+                "embed_text": f"{header}\n{ch['text']}",
+            })
+            cid += 1
+    return sections, records
+
+
+def run(keys=None, force=False, quiet=False):
+    cfg = corpus.load()
+    count = None
+    corpus.CHUNK_DIR.mkdir(parents=True, exist_ok=True)
+
+    stats, skipped, dirty = {}, [], False
+    for key, doc in cfg["documents"].items():
+        if keys and key not in keys:
+            continue
+        paths = corpus.doc_paths(key, doc)
+        if not paths["clean"].exists():
+            continue
+        sig = f"{doc.get('clean_sig')}|{doc.get('title')}|{doc.get('slot')}"
+        if not force and paths["chunks"].exists() and doc.get("chunk_sig") == sig:
+            skipped.append(key)
+            continue
+        if count is None:  # the tokenizer is a 2 s import; skip it on a no-op build
+            count = Counter(load_tokenizer(cfg["embed_model"]))
+        if not quiet:
+            print(f"  chunking {key}", flush=True)
+        sections, records = chunk_document(key, doc, count)
+        with paths["chunks"].open("w", encoding="utf-8") as fh:
+            for r in records:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        doc["chunk_sig"] = sig
+        doc["chunks"] = len(records)
+        stats[key] = (len(sections), len(records))
+        dirty = True
+
+    if dirty:
+        corpus.save(cfg)
+    return cfg, stats, skipped
+
+
 def main():
-    count = Counter(load_tokenizer())
-    records, cid = [], 0
-    stats = {}
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--only", nargs="*", help="document keys to chunk")
+    ap.add_argument("--force", action="store_true", help="re-chunk even if unchanged")
+    args = ap.parse_args()
 
-    for fname, meta in BOOKS.items():
-        sections = parse_sections(SRC / fname)
-        n_book = 0
-        for sec in sections:
-            label = f"Section {sec['section']} {sec['title']}" if sec["section"] else sec["title"]
-            header = f"[{meta['short']} | {label}]"
-            for ch in pack(sec["blocks"], count, header):
-                if ch["n_tokens"] < MIN_TOKENS:
-                    continue
-                records.append({
-                    "id": cid,
-                    "book": meta["key"],
-                    "book_title": meta["short"],
-                    "chapter": sec["chapter"],
-                    "section": sec["section"],
-                    "section_title": sec["title"],
-                    "page_start": ch["page_start"],
-                    "page_end": ch["page_end"],
-                    "n_tokens": ch["n_tokens"],
-                    "text": ch["text"],
-                    "embed_text": f"{header}\n{ch['text']}",
-                })
-                cid += 1
-                n_book += 1
-        stats[meta["key"]] = (len(sections), n_book)
+    cfg, stats, skipped = run(args.only, args.force)
+    if skipped:
+        print(f"unchanged: {', '.join(skipped)}")
+    if stats:
+        w = max(len(k) for k in stats)
+        print(f"{'book':<{w}} {'sections':>9} {'chunks':>8}")
+        for k, (s, c) in stats.items():
+            print(f"{k:<{w}} {s:>9} {c:>8}")
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    with OUT.open("w", encoding="utf-8") as fh:
-        for r in records:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-    toks = [r["n_tokens"] for r in records]
-    toks.sort()
-    print(f"{'book':<12} {'sections':>9} {'chunks':>8}")
-    for k, (s, c) in stats.items():
-        print(f"{k:<12} {s:>9} {c:>8}")
-    print(f"\ntotal chunks : {len(records)}")
-    print(f"tokens       : min {toks[0]}  p50 {toks[len(toks)//2]}  "
-          f"p95 {toks[int(len(toks)*0.95)]}  max {toks[-1]}")
-    print(f"written      : {OUT}")
+    toks = []
+    for key, doc in cfg["documents"].items():
+        path = corpus.doc_paths(key, doc)["chunks"]
+        if path.exists():
+            toks += [json.loads(l)["n_tokens"] for l in path.open(encoding="utf-8")]
+    if toks:
+        toks.sort()
+        print(f"\ncorpus total : {len(toks)} chunks")
+        print(f"tokens       : min {toks[0]}  p50 {toks[len(toks)//2]}  "
+              f"p95 {toks[int(len(toks)*0.95)]}  max {toks[-1]}")
 
 
 if __name__ == "__main__":

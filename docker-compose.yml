@@ -1,26 +1,90 @@
-# Shared Qdrant for the team.
+# The whole system in one command:
 #
-# The local data/qdrant store is a locked SQLite file -- one process at a time,
-# so it cannot back several teammates' MCP servers. Run this on a host everyone
-# can reach, load it once, then have each teammate set QDRANT_URL.
+#   ./deploy.sh          (Linux/macOS)      .\deploy.ps1     (Windows)
+#   docker compose up -d --build            once .env exists
 #
-#   docker compose up -d
-#   QDRANT_URL=http://localhost:6333 .venv/Scripts/python scripts/ingest_qdrant.py --recreate
+#   internet --> caddy (TLS) --> mcp (streamable-http, OAuth/bearer) --> qdrant
+#                                    \-- model_cache volume (~2.8 GB)
+#                builder ---------------------------------------------->+
+#                (runs the ingest pipeline, then exits)
 #
-# QDRANT__SERVICE__API_KEY is read from a .env file next to this one. Qdrant has
-# no user accounts -- that single key is all the access control there is, so keep
-# the container off the public internet (VPN, campus network, or SSH tunnel).
+# `builder` turns everything in original/ into vectors before `mcp` is allowed to
+# start, and re-runs on every `up`. It is incremental: a book already in the index
+# is skipped, so adding one PDF and running `docker compose up -d --build` again
+# embeds that book only. Caddy is optional -- it lives behind the `tls` profile,
+# because a laptop or a tunnelled host has no public DNS name for it to certify.
 services:
   qdrant:
     image: qdrant/qdrant:v1.12.4
     restart: unless-stopped
-    ports:
-      - "6333:6333"   # REST + web dashboard at /dashboard
-      - "6334:6334"   # gRPC
     volumes:
       - qdrant_storage:/qdrant/storage
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  builder:
+    build: .
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      # the corpus, read-write: extraction and chunking cache their output here
+      - ./original:/app/original
+      - ./extracted:/app/extracted
+      - ./data:/app/data
+      - ./corpus.json:/app/corpus.json
+      - model_cache:/models
+    command: ["python", "/app/rag.py", "build", "--keep-going"]
+    restart: "no"
+
+  mcp:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      builder:
+        condition: service_completed_successfully
+    ports:
+      # published on loopback only: reach it through caddy, a tunnel, or an SSH
+      # forward. Change to "8000:8000" to expose it on the host's network.
+      - "127.0.0.1:8000:8000"
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      MCP_TEAM_PASSWORD: ${MCP_TEAM_PASSWORD:-}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-http://localhost:8000}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+      RAG_RERANK: ${RAG_RERANK:-1}
+    volumes:
+      # model weights (~2.8 GB) land here on first run and survive rebuilds
+      - model_cache:/models
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on:
+      - mcp
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env to use the tls profile}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
   qdrant_storage:
+  model_cache:
+  caddy_data:
+  caddy_config:

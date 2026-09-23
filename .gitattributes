@@ -14,3 +14,9 @@ Caddyfile  text eol=lf
 *.ps1   text eol=crlf
 
 *.pdf   binary
+
+# The vector index, when it is committed rather than rebuilt per machine. Marking
+# it binary explicitly is not optional: if git ever decided this was text and
+# applied line-ending conversion, it would corrupt the database silently.
+*.sqlite binary
+*.lock   binary

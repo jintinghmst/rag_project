@@ -159,11 +159,19 @@ def cmd_build(args):
     import corpus
     import extract_pdf
     import ingest_qdrant
+    import scan_pdfs
 
     if not corpus.pdfs() and not list(corpus.TEXT_DIR.glob("*.txt")):
         sys.exit(f"no PDFs in {corpus.PDF_DIR.name}/ -- drop some in and run this again")
 
-    print("[1/4] extracting text from PDFs")
+    print("[1/5] scanning original/ for new documents")
+    _, registered, failed, removed = scan_pdfs.run(rescan=args.rescan, quiet=True)
+    for rel, err in failed:
+        print(f"  ! {rel}: {err}")
+    print(f"  registered {len(registered)} new document(s)"
+          + (f", pruned {len(removed)} non-papers" if removed else ""))
+
+    print("[2/5] extracting text from PDFs")
     _, report, added = extract_pdf.run(args.only, args.engine, args.force)
     for key in added:
         print(f"  + registered new document: {key}")
@@ -176,12 +184,12 @@ def cmd_build(args):
         sys.exit("\nA PDF has no text layer. OCR it first (e.g. `ocrmypdf in.pdf out.pdf`),\n"
                  "or re-run with --keep-going to index the rest.")
 
-    print("[2/4] cleaning")
+    print("[3/5] cleaning")
     _, rows, skipped = clean_corpus.run(args.only, args.force)
     if skipped:
         print(f"  unchanged: {', '.join(skipped)}")
 
-    print("[3/4] chunking")
+    print("[4/5] chunking")
     _, stats, skipped = chunk_corpus.run(args.only, args.force)
     if skipped:
         print(f"  unchanged: {', '.join(skipped)}")
@@ -192,7 +200,7 @@ def cmd_build(args):
         print("\nstopping before ingest (--no-ingest)")
         return 0
 
-    print("[4/4] embedding and indexing")
+    print("[5/5] embedding and indexing")
     collection, loaded, skipped, points = ingest_qdrant.run(
         args.only, args.force, args.recreate, args.batch)
     if skipped:
@@ -250,26 +258,45 @@ def cmd_status(args):
     sys.path.insert(0, str(SCRIPTS))
     import corpus
 
-    cfg = corpus.load()
-    unregistered = [p.name for p in corpus.pdfs()
-                    if p.name not in {d.get("pdf") for d in cfg["documents"].values()}]
+    from collections import Counter
 
-    print(f"{'document':<14} {'pdf':>5} {'text':>6} {'clean':>6} {'chunks':>8}")
-    for key, doc in cfg["documents"].items():
-        p = corpus.doc_paths(key, doc)
-        n = doc.get("chunks", 0) if p["chunks"].exists() else 0
-        print(f"{key:<14} {'yes' if p['pdf'] and p['pdf'].exists() else 'no':>5} "
-              f"{'yes' if p['text'].exists() else 'no':>6} "
-              f"{'yes' if p['clean'].exists() else 'no':>6} {n:>8}")
-    for name in unregistered:
-        print(f"  (not yet registered: {name} -- run `python rag.py build`)")
+    cfg = corpus.load()
+    docs = cfg["documents"]
+    registered = {d.get("pdf") for d in docs.values()}
+    unregistered = [corpus.rel_pdf(p) for p in corpus.pdfs()
+                    if corpus.rel_pdf(p) not in registered]
+
+    # Grouped by venue, not listed one line per document: the corpus runs to
+    # thousands of papers, and a per-document dump scrolls the useful totals off
+    # the screen.
+    rows = Counter()
+    built = Counter()
+    for key, doc in docs.items():
+        group = doc.get("source") or "(textbooks)"
+        rows[group] += 1
+        if corpus.doc_paths(key, doc)["chunks"].exists():
+            built[group] += 1
+
+    width = max((len(g) for g in rows), default=10)
+    print(f"{'source':<{width}} {'docs':>6} {'chunked':>8}")
+    for group in sorted(rows):
+        print(f"{group:<{width}} {rows[group]:>6} {built[group]:>8}")
+    print(f"{'TOTAL':<{width}} {sum(rows.values()):>6} {sum(built.values()):>8}")
+    if unregistered:
+        print(f"\n{len(unregistered)} PDF(s) not yet registered "
+              f"-- run `python rag.py build`:")
+        for name in unregistered[:5]:
+            print(f"  {name}")
+        if len(unregistered) > 5:
+            print(f"  ... and {len(unregistered) - 5} more")
 
     try:
         import search_qdrant as sq
-        rows = sq.list_documents()
-        print(f"\nindexed in '{sq.COLLECTION}':")
-        for r in rows:
-            print(f"  {r['book']:<14} {r['chunks']:>6}  {r['title'][:60]}")
+        indexed = sq.list_documents()
+        chunks = sum(r.get("chunks", 0) for r in indexed)
+        kinds = Counter(r.get("kind", "?") for r in indexed)
+        print(f"\nindexed in '{sq.COLLECTION}': {len(indexed)} documents, "
+              f"{chunks} chunks {dict(kinds)}")
     except Exception as exc:
         print(f"\nindex not reachable: {exc.__class__.__name__}: {exc}")
     return 0
@@ -586,7 +613,7 @@ def cmd_up(args):
         return subprocess.call([str(VENV_PYTHON), str(ROOT / "rag.py"), "up"])
     rc = cmd_build(argparse.Namespace(
         only=None, engine="pymupdf", force=False, recreate=False,
-        batch=8, no_ingest=False, keep_going=False, wait=0))
+        batch=8, no_ingest=False, keep_going=False, wait=0, rescan=False))
     if rc:
         return rc
     return cmd_serve(argparse.Namespace(
@@ -618,6 +645,8 @@ def build_parser():
                    help="index the rest even if a PDF needs OCR")
     p.add_argument("--wait", type=int, default=0, metavar="SECONDS",
                    help="wait for QDRANT_URL to answer before building")
+    p.add_argument("--rescan", action="store_true",
+                   help="re-read the structure of PDFs already registered")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("remove", help="drop a document from the index and the registry")
@@ -680,6 +709,15 @@ def build_parser():
 
 
 def main():
+    # Paper titles carry ligatures and dashes that a cp936/cp1252 console cannot
+    # encode; without this, printing a result set raises UnicodeEncodeError
+    # part-way through and looks like a crash in the index.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     args = build_parser().parse_args()
     if getattr(args, "venv", True):
         reexec_in_venv(sys.argv[1:])

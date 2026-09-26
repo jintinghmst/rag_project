@@ -181,20 +181,28 @@ def client():
         "Call list_books first if you want to restrict the search to one book."
     )
 )
-def search_textbooks(query: str, k: int = 6, book: str | None = None) -> str:
+def search_textbooks(query: str, k: int = 6, book: str | None = None,
+                     source: str | None = None, kind: str | None = None) -> str:
     """
     Args:
         query: A natural-language question or topic. Full sentences work better
             than keywords.
         k: How many passages to return (1-15).
-        book: Optional filter -- a book key from list_books. Omit to search all.
+        book: Optional filter -- a single document key from list_books.
+        source: Optional filter -- a journal and/or year, e.g.
+            "IEEE Transactions on Microwave Theory and Techniques / 2025", or
+            just "2025". Call list_books() to see what is available.
+        kind: Optional filter -- "book" for the textbooks only, "article" for
+            the journal papers only. Use "book" for settled theory and "article"
+            for recent results.
     """
     k = max(1, min(int(k), 15))
-    if book and book not in books():
-        return f"Unknown book {book!r}. Valid values: {', '.join(books())}."
+    if kind and kind not in {"book", "article"}:
+        return 'kind must be "book" or "article".'
 
     with quiet():
         hits = sq.search(query, k=k, candidates=max(30, k * 5), book=book,
+                         source=source, kind=kind,
                          rerank=RERANK, client=client())
     if not hits:
         return "No passages matched that query."
@@ -285,12 +293,46 @@ if oauth_provider is not None:
         return RedirectResponse(target, status_code=302)
 
 
-@server.tool(description="List the books in the corpus and their coverage.")
-def list_books() -> str:
-    """Returns each book key, full title and indexed chunk count."""
+@server.tool(
+    description=(
+        "Summarise what the corpus covers: the textbooks, and the journals and "
+        "years of the indexed papers. Call this to discover the `source` values "
+        "accepted by search_textbooks."
+    )
+)
+def list_books(source: str | None = None) -> str:
+    """
+    Args:
+        source: Optional. Given a journal or year, list the individual papers
+            filed under it instead of the summary. Omit for the overview.
+    """
     with quiet():
         rows = sq.list_documents(client())
-    return json.dumps(rows, indent=2)
+
+    if source:
+        hits = [r for r in rows if source.lower() in (r.get("source") or "").lower()]
+        if not hits:
+            return f"Nothing indexed under {source!r}. Call list_books() for the sources."
+        # a single journal-year still runs to dozens of papers; cap it so the
+        # model gets a usable sample rather than a wall of titles
+        out = [{"book": r["book"], "title": r["title"], "source": r.get("source", "")}
+               for r in sorted(hits, key=lambda r: r["title"])[:80]]
+        return json.dumps({"source": source, "papers": len(hits),
+                           "showing": len(out), "documents": out}, indent=2)
+
+    books = [r for r in rows if r.get("kind") != "article"]
+    venues = {}
+    for r in rows:
+        if r.get("kind") == "article":
+            venues[r.get("source") or "(unfiled)"] = venues.get(r.get("source") or "(unfiled)", 0) + 1
+    return json.dumps({
+        "textbooks": [{"book": r["book"], "title": r["title"], "chunks": r["chunks"]}
+                      for r in books],
+        "papers_by_source": dict(sorted(venues.items())),
+        "total_documents": len(rows),
+        "hint": "search_textbooks(query, source='IEEE Transactions on ... / 2025') "
+                "restricts retrieval to one journal or year.",
+    }, indent=2)
 
 
 if __name__ == "__main__":

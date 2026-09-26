@@ -70,7 +70,25 @@ def save(cfg):
 
 
 def pdfs():
-    return sorted(p for p in PDF_DIR.glob("*.pdf") if not p.name.startswith("~"))
+    """Every PDF under original/, at any depth, as paths relative to it.
+
+    Recursive because the corpus is filed by journal and year. Sorted so a scan
+    assigns slots in a stable order, and a rebuild on another machine produces
+    the same chunk ids.
+    """
+    out = []
+    seen = set()
+    for p in sorted(PDF_DIR.rglob("*.pdf")):
+        if p.name.startswith("~") or p.name.startswith("."):
+            continue
+        # the same file filed in two places (a book both loose and under Books/)
+        # would otherwise be indexed twice
+        fingerprint = (p.stat().st_size, p.name.lower())
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        out.append(p)
+    return out
 
 
 def next_slot(cfg):
@@ -104,6 +122,11 @@ def discover(cfg):
     return added
 
 
+def rel_pdf(path):
+    """Store PDFs as paths relative to original/, so the registry is portable."""
+    return Path(path).resolve().relative_to(PDF_DIR.resolve()).as_posix()
+
+
 def doc_paths(key, doc):
     return {
         "pdf": PDF_DIR / doc["pdf"] if doc.get("pdf") else None,
@@ -131,10 +154,14 @@ def file_hash(*paths):
         p = Path(p) if p else None
         if not p or not p.exists():
             continue
-        data = p.read_bytes()
         if p.suffix.lower() in {".txt", ".json", ".jsonl", ".md"}:
-            data = data.replace(b"\r\n", b"\n")
-        h.update(data)
+            h.update(p.read_bytes().replace(b"\r\n", b"\n"))
+            continue
+        # binaries are streamed: a journal issue runs to 700 MB, and reading one
+        # into memory per hash is a needless spike when hashing 18 GB of them
+        with p.open("rb") as fh:
+            for block in iter(lambda: fh.read(4 << 20), b""):
+                h.update(block)
     return h.hexdigest()
 
 

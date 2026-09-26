@@ -31,11 +31,30 @@ from search_qdrant import get_client  # noqa: E402
 
 DENSE_DIM = 1024
 MAX_LENGTH = 1024
-PAYLOAD_INDEXES = {"book": "keyword", "chapter": "integer", "section": "keyword"}
+PAYLOAD_INDEXES = {"book": "keyword", "chapter": "integer", "section": "keyword",
+                   "kind": "keyword", "source": "text"}
 
 
 def manifest_name(collection):
     return f"{collection}__manifest"
+
+
+def scroll_all(client, name, page=1000):
+    """
+    Every point in a collection, following the cursor.
+
+    A single scroll returns one page. Reading only the first page here would
+    silently report a corpus of thousands as a corpus of `page`, and -- far
+    worse -- make the ingest re-embed every document past that first page on
+    each build, because they would look absent from the manifest.
+    """
+    out, offset = [], None
+    while True:
+        points, offset = client.scroll(collection_name=name, limit=page,
+                                       offset=offset, with_payload=True)
+        out += points
+        if offset is None:
+            return out
 
 
 def read_manifest(client, collection):
@@ -43,8 +62,8 @@ def read_manifest(client, collection):
     name = manifest_name(collection)
     if not client.collection_exists(name):
         return {}
-    points, _ = client.scroll(collection_name=name, limit=1000, with_payload=True)
-    return {p.payload["key"]: p.payload.get("sig") for p in points}
+    return {p.payload["key"]: p.payload.get("sig")
+            for p in scroll_all(client, name)}
 
 
 def write_manifest(client, collection, key, doc, sig, n):
@@ -63,7 +82,8 @@ def write_manifest(client, collection, key, doc, sig, n):
         points=[models.PointStruct(
             id=doc["slot"],
             vector=[0.0],
-            payload={"key": key, "title": doc["title"], "sig": sig, "chunks": n},
+            payload={"key": key, "title": doc["title"], "sig": sig, "chunks": n,
+                     "kind": doc.get("kind", "book"), "source": doc.get("source", "")},
         )],
     )
 
@@ -81,12 +101,13 @@ def ensure_collection(client, collection):
         sparse_vectors_config={"sparse": models.SparseVectorParams()},
     )
     for field, kind in PAYLOAD_INDEXES.items():
+        schema = {
+            "keyword": models.PayloadSchemaType.KEYWORD,
+            "integer": models.PayloadSchemaType.INTEGER,
+            "text": models.PayloadSchemaType.TEXT,
+        }[kind]
         client.create_payload_index(
-            collection_name=collection,
-            field_name=field,
-            field_schema=models.PayloadSchemaType.KEYWORD if kind == "keyword"
-            else models.PayloadSchemaType.INTEGER,
-        )
+            collection_name=collection, field_name=field, field_schema=schema)
 
 
 def load_chunks(path, limit=None):

@@ -60,12 +60,17 @@ def list_documents(client=None):
     try:
         name = f"{COLLECTION}__manifest"
         if client.collection_exists(name):
-            points, _ = client.scroll(collection_name=name, limit=1000, with_payload=True)
+            import ingest_qdrant
+
+            points = ingest_qdrant.scroll_all(client, name)
             rows = [{"book": p.payload["key"], "title": p.payload.get("title", ""),
-                     "chunks": p.payload.get("chunks", 0)} for p in points]
+                     "chunks": p.payload.get("chunks", 0),
+                     "kind": p.payload.get("kind", "book"),
+                     "source": p.payload.get("source", "")} for p in points]
             if rows:
                 return sorted(rows, key=lambda r: r["book"])
-        return [{"book": k, "title": d["title"], "chunks": d.get("chunks", 0)}
+        return [{"book": k, "title": d["title"], "chunks": d.get("chunks", 0),
+                 "kind": d.get("kind", "book"), "source": d.get("source", "")}
                 for k, d in sorted(corpus.load()["documents"].items())]
     finally:
         if owns:
@@ -87,7 +92,8 @@ def get_client():
     return QdrantClient(path=str(QDRANT_PATH))
 
 
-def search(query, k=5, candidates=30, book=None, rerank=True, client=None):
+def search(query, k=5, candidates=30, book=None, rerank=True, client=None,
+           source=None, kind=None):
     from qdrant_client import models
 
     owns_client = client is None
@@ -105,11 +111,20 @@ def search(query, k=5, candidates=30, book=None, rerank=True, client=None):
             values=[float(v) for v in lex.values()],
         )
 
-        flt = (
-            models.Filter(must=[models.FieldCondition(key="book", match=models.MatchValue(value=book))])
-            if book
-            else None
-        )
+        # `source` matches a folder prefix ("IEEE Transactions on ... / 2025"),
+        # so a whole journal or a single year can be selected without naming
+        # every paper in it
+        must = []
+        if book:
+            must.append(models.FieldCondition(key="book",
+                                              match=models.MatchValue(value=book)))
+        if kind:
+            must.append(models.FieldCondition(key="kind",
+                                              match=models.MatchValue(value=kind)))
+        if source:
+            must.append(models.FieldCondition(key="source",
+                                              match=models.MatchText(text=source)))
+        flt = models.Filter(must=must) if must else None
 
         res = client.query_points(
             collection_name=COLLECTION,
@@ -141,13 +156,24 @@ def search(query, k=5, candidates=30, book=None, rerank=True, client=None):
 
 
 def cite(h):
+    """
+    One line a reader can follow back to the page.
+
+    A paper names its venue and year, which a textbook does not need -- "Hall &
+    Heck" identifies itself, while a paper title alone leaves the reader unable
+    to tell a 2026 result from a 2022 one.
+    """
     sec = f"S{h['section']} {h['section_title']}" if h.get("section") else h.get("section_title", "")
     pages = (
         f"p.{h['page_start']}"
         if h.get("page_start") == h.get("page_end")
         else f"pp.{h.get('page_start')}-{h.get('page_end')}"
     )
-    return f"{h['book_title']} | {sec} | {pages}"
+    parts = [h["book_title"]]
+    if h.get("source"):
+        parts.append(h["source"])
+    parts += [sec, pages]
+    return " | ".join(p for p in parts if p)
 
 
 def main():

@@ -2,23 +2,31 @@
 __pycache__/
 *.pyc
 
-# data/ IS committed: the vector index is built on the GPU machine and shipped
-# through git, because the host has no GPU and the two are on different networks.
-# One machine builds; everyone else pulls and serves. Consequences:
-#   - storage.sqlite is ~31 MB of binary, and a fresh copy enters history on
-#     every rebuild. History cannot be pruned without rewriting it.
-#   - it cannot merge. If two machines both build, one side's work is discarded.
-#   - stop the server before pulling: the embedded store is a locked file, and a
-#     running server holds the old one open.
+# original/ is NOT committed: 18 GB of PDFs, 78 of them over GitHub's 100 MB
+# per-file hard limit. corpus.json records each document's path under it, so the
+# machine that holds the PDFs can always rebuild.
+original/
+
+# data/ is NOT committed either, though an earlier plan was to ship it this way.
+# Two facts killed that: the index is 2.2 GB (past Git LFS's free tier, and a
+# fresh copy would enter history on every rebuild), and at 158k points the
+# embedded store answers a query in ~7 s because it has no ANN index -- so even
+# if it were shipped, the receiving machine could not serve from it acceptably.
+# Move the index with a Qdrant snapshot instead, and serve it from a Qdrant
+# server. See HOSTING.md.
+data/
+
+# extracted/ holds one text file per document -- 221 MB once the journals were
+# added, and regenerable from the PDFs. Only the three textbook extractions are
+# kept: one of them is OCR output for a scanned book that cannot be reproduced
+# from its PDF, and they are what the cleaning heuristics were tuned against.
+extracted/*
+!extracted/paul_mtl.txt
+!extracted/hall_asi.txt
+!extracted/dsi_mod.txt
 
 # secrets: QDRANT_API_KEY, MCP_TEAM_PASSWORD, ANTHROPIC_API_KEY
 .env
 
-# extracted/ IS committed: it is the cached PDF text every later stage was tuned
-# against, and one book's copy is OCR output that cannot be regenerated from its
-# scanned PDF.
-
-# Runtime noise, not data -- keep it out even when data/ is committed.
-data/serve.log
+# runtime noise
 *.log
-data/qdrant/*.lock

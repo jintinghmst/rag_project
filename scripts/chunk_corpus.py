@@ -55,6 +55,38 @@ class Counter:
         return len(self.tok(text, add_special_tokens=False)["input_ids"])
 
 
+# IEEE paper structure: "II. ANTENNA DESIGN" for sections, "A. Feed Network" for
+# subsections. Nothing like a book's "3.4.6", so a paper chunked with the book
+# rules lands entirely in one nameless section and cites nothing useful.
+ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8,
+         "IX": 9, "X": 10, "XI": 11, "XII": 12, "XIII": 13, "XIV": 14, "XV": 15}
+PAPER_SECTION_RE = re.compile(r"^([IVX]{1,5})\.\s+([A-Z][A-Za-z].{2,90})$")
+PAPER_SUBSECTION_RE = re.compile(r"^([A-Z])\.\s+([A-Z][A-Za-z].{2,90})$")
+
+
+def is_paper_heading(line, state):
+    """Headings for an IEEE-style article, tracking the current roman section."""
+    text = line.strip()
+    m = PAPER_SECTION_RE.match(text)
+    if m and m.group(1) in ROMAN:
+        title = re.sub(r"\s+", " ", m.group(2)).strip()
+        if sum(c.isalpha() for c in title) >= 3 and not re.search(r"\s\d{1,4}$", title):
+            state["section"] = ROMAN[m.group(1)]
+            state["sub"] = None
+            return {"chapter": ROMAN[m.group(1)], "section": m.group(1),
+                    "title": title}
+    m = PAPER_SUBSECTION_RE.match(text)
+    if m and state.get("section"):
+        title = re.sub(r"\s+", " ", m.group(2)).strip()
+        # "A. Smith is with the Department of..." is an author footnote, not a
+        # subsection; real subsection titles do not run on into a sentence
+        if len(title) <= 70 and sum(c.isalpha() for c in title) >= 3:
+            roman = [r for r, v in ROMAN.items() if v == state["section"]][0]
+            return {"chapter": state["section"],
+                    "section": f"{roman}.{m.group(1)}", "title": title}
+    return None
+
+
 def is_heading(line):
     m = HEADING_RE.match(line.strip())
     if not m:
@@ -75,10 +107,12 @@ def is_heading(line):
     }
 
 
-def parse_sections(path):
+def parse_sections(path, kind="book"):
     """Yield {chapter, section, title, blocks:[(text, page_start, page_end)]}."""
     page = None
-    current = {"chapter": None, "section": None, "title": "front matter", "blocks": []}
+    state = {}
+    opening = "front matter" if kind == "book" else "abstract"
+    current = {"chapter": None, "section": None, "title": opening, "blocks": []}
     buf, buf_start = [], None
     sections = []
 
@@ -103,7 +137,7 @@ def parse_sections(path):
         if m:
             page = int(m.group(1))
             continue
-        h = is_heading(line)
+        h = is_paper_heading(line, state) if kind == "article" else is_heading(line)
         if h:
             flush_section()
             current = dict(h, blocks=[])
@@ -183,14 +217,19 @@ def split_long(text, count):
 
 def chunk_document(key, doc, count):
     """All chunks for one document, ids allocated from its own block."""
-    sections = parse_sections(corpus.doc_paths(key, doc)["clean"])
+    sections = parse_sections(corpus.doc_paths(key, doc)["clean"],
+                              doc.get("kind", "book"))
     base, ceiling = corpus.id_range(doc)
     title = doc["title"]
     records, cid = [], base
 
     for sec in sections:
         label = f"Section {sec['section']} {sec['title']}" if sec["section"] else sec["title"]
-        header = f"[{title} | {label}]"
+        # the provenance header is embedded with the chunk, so a paper carries its
+        # venue and year into the vector -- "crosstalk" in a 2025 T-SIPI paper and
+        # in a 2008 textbook should not look identical to the retriever
+        source = doc.get("source")
+        header = f"[{title}" + (f" | {source}" if source else "") + f" | {label}]"
         for ch in pack(sec["blocks"], count, header):
             if ch["n_tokens"] < MIN_TOKENS:
                 continue
@@ -202,6 +241,8 @@ def chunk_document(key, doc, count):
                 "id": cid,
                 "book": key,
                 "book_title": title,
+                "kind": doc.get("kind", "book"),
+                "source": doc.get("source", ""),
                 "chapter": sec["chapter"],
                 "section": sec["section"],
                 "section_title": sec["title"],

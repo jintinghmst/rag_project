@@ -253,6 +253,22 @@ def cmd_remove(args):
     return 0
 
 
+def cmd_migrate(args):
+    """Move an embedded index into a Qdrant server without re-embedding it."""
+    load_env()
+    sys.path.insert(0, str(SCRIPTS))
+    import migrate_qdrant
+
+    url = args.to or os.environ.get("QDRANT_URL")
+    if not url:
+        sys.exit("where to? pass --to http://host:6333, or set QDRANT_URL in .env")
+    points, manifest, served = migrate_qdrant.run(url, os.environ.get("QDRANT_API_KEY"))
+    print(f"\ncopied {points} points and {manifest} manifest entries; "
+          f"target holds {served}")
+    print(f"\nAdd to .env so builds and the server use it:\n  QDRANT_URL={url}")
+    return 0
+
+
 def cmd_status(args):
     load_env()
     sys.path.insert(0, str(SCRIPTS))
@@ -654,6 +670,11 @@ def build_parser():
     p.add_argument("--purge", action="store_true",
                    help="also delete its PDF and extracted text")
     p.set_defaults(func=cmd_remove)
+
+    p = sub.add_parser("migrate",
+                       help="copy the embedded index into a Qdrant server")
+    p.add_argument("--to", help="target server, e.g. http://localhost:6333")
+    p.set_defaults(func=cmd_migrate)
 
     p = sub.add_parser("status", help="what is registered, built and indexed")
     p.set_defaults(func=cmd_status)

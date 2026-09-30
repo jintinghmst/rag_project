@@ -218,12 +218,18 @@ def register_pdf(cfg, path, rescan=False):
     added = []
     with open_pdf(path) as doc:
         if not looks_like_issue(doc):
-            title = page_title(doc[0]) if doc.page_count else ""
+            # Long but unsplittable: a journal issue whose PDF carries no usable
+            # outline. Its first page is a contents listing, so page_title() would
+            # name the document "ISSN 0018-926X APRIL 2023 VOLUME 71 ...". Name it
+            # from the file instead and mark it, so it is visibly one lump of many
+            # papers rather than passing as a single work.
+            bulk = doc.page_count >= MIN_ISSUE_PAGES
+            title = "" if bulk else (page_title(doc[0]) if doc.page_count else "")
             key = unique_key(cfg, corpus.short_key(path.stem))
             cfg["documents"][key] = {
                 "pdf": rel,
-                "title": title or re.sub(r"\s+", " ", path.stem).strip(),
-                "kind": "article" if doc.page_count < MIN_ISSUE_PAGES else "book",
+                "title": title or re.sub(r"[_]+", " ", path.stem).strip(),
+                "kind": "issue" if bulk else "article",
                 "source": source_label(rel),
                 "slot": corpus.next_slot(cfg),
                 "text": f"{key}.txt",

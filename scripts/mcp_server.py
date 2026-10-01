@@ -335,6 +335,20 @@ def list_books(source: str | None = None) -> str:
     }, indent=2)
 
 
+# A browsable view of the corpus at /browse, on the same origin as /mcp. Only
+# worth mounting over HTTP: under stdio there is no origin to serve it from.
+if os.environ.get("MCP_TRANSPORT", "stdio") != "stdio":
+    import browse  # noqa: E402
+
+    browse.register(
+        server,
+        search=lambda *a, **kw: sq.search(*a, client=client(), rerank=RERANK, **kw),
+        cite=sq.cite,
+        list_documents=lambda: sq.list_documents(client()),
+        quiet=quiet,
+    )
+
+
 if __name__ == "__main__":
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
     if transport == "stdio":

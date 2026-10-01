@@ -162,6 +162,23 @@ After editing `.env`, re-run `./deploy.sh` to apply it.
 
 ---
 
+## 5b. Browse the corpus in a browser
+
+`https://<domain>/browse` lists every registered document -- title, venue, year,
+page range and how many chunks of it are searchable -- with instant client-side
+filtering, and a "Search text" button that runs the same hybrid retrieval the MCP
+tools use and shows the cited passages.
+
+It is mounted on the same origin as `/mcp`, so the tunnel and certificate already
+cover it; there is nothing extra to deploy. It appears only under HTTP transport
+(there is no origin under stdio).
+
+Access is the same `MCP_TEAM_PASSWORD`, held in a signed cookie for two weeks.
+That gate is not decoration: the page is an index of verbatim text from
+copyrighted textbooks and paywalled journals on a public hostname. The listing is
+metadata only -- passages appear just in response to a search, which is what the
+MCP tools already expose.
+
 ## 6. Verify before telling anyone
 
 ```bash

@@ -88,7 +88,28 @@ def write_manifest(client, collection, key, doc, sig, n):
     )
 
 
-def ensure_collection(client, collection):
+def create_payload_indexes(client, collection):
+    from qdrant_client import models
+
+    for field, kind in PAYLOAD_INDEXES.items():
+        schema = {
+            "keyword": models.PayloadSchemaType.KEYWORD,
+            "integer": models.PayloadSchemaType.INTEGER,
+            "text": models.PayloadSchemaType.TEXT,
+        }[kind]
+        client.create_payload_index(
+            collection_name=collection, field_name=field, field_schema=schema)
+
+
+def ensure_collection(client, collection, with_indexes=True):
+    """
+    Create the collection if it is missing.
+
+    `with_indexes=False` is for a bulk load: building payload indexes while
+    points stream in makes the optimizer rebuild them segment by segment, which
+    needs temp space proportional to the whole collection. On a tight disk that
+    is what fails (OS error 112). Load first, index once at the end.
+    """
     from qdrant_client import models
 
     if client.collection_exists(collection):
@@ -100,14 +121,8 @@ def ensure_collection(client, collection):
         },
         sparse_vectors_config={"sparse": models.SparseVectorParams()},
     )
-    for field, kind in PAYLOAD_INDEXES.items():
-        schema = {
-            "keyword": models.PayloadSchemaType.KEYWORD,
-            "integer": models.PayloadSchemaType.INTEGER,
-            "text": models.PayloadSchemaType.TEXT,
-        }[kind]
-        client.create_payload_index(
-            collection_name=collection, field_name=field, field_schema=schema)
+    if with_indexes:
+        create_payload_indexes(client, collection)
 
 
 def load_chunks(path, limit=None):

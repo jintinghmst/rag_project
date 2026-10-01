@@ -82,9 +82,13 @@ def run(url, api_key=None, quiet=False):
             print(f"  source: {info.points_count} points at {corpus.QDRANT_PATH}")
             print(f"  target: {url}")
 
+        # indexes are built once at the end, not per segment while loading
         n = copy_collection(
             src, dst, collection,
-            lambda: iq.ensure_collection(dst, collection), quiet)
+            lambda: iq.ensure_collection(dst, collection, with_indexes=False), quiet)
+        if not quiet:
+            print("  building payload indexes", flush=True)
+        iq.create_payload_indexes(dst, collection)
 
         from qdrant_client import models
         m = copy_collection(

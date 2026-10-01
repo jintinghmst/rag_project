@@ -269,6 +269,61 @@ def cmd_migrate(args):
     return 0
 
 
+def cmd_verify(args):
+    """Check that registry, extracted text, chunks and index still agree."""
+    load_env()
+    sys.path.insert(0, str(SCRIPTS))
+    import maintain
+
+    summary, problems, pending = maintain.verify(deep=args.deep)
+    print(f"documents   {summary['documents']}")
+    for field, label in (("text", "with text"), ("clean", "cleaned"),
+                         ("chunks", "chunked"), ("indexed", "indexed")):
+        print(f"{label:<12}{summary[field]}")
+    print(f"index       {summary['index']}")
+    if summary["missing_pdf"]:
+        print(f"\n{summary['missing_pdf']} document(s) have no PDF -- fine, the "
+              f"extracted text is what the build uses")
+    if summary["stale_text"]:
+        print(f"{summary['stale_text']} document(s) have text that no longer "
+              f"matches its recorded hash")
+
+    if pending:
+        kinds = {}
+        for _, stage, _ in pending:
+            kinds[stage] = kinds.get(stage, 0) + 1
+        print("\npending (queued work, not faults): "
+              + ", ".join(f"{n} awaiting {s}" for s, n in sorted(kinds.items())))
+
+    if not problems:
+        print("\nOK -- no integrity problems")
+        return 0
+    print(f"\n{len(problems)} problem(s):")
+    for key, stage, detail in problems[:args.limit]:
+        print(f"  [{stage:<6}] {key[:48]:<48} {detail}")
+    if len(problems) > args.limit:
+        print(f"  ... and {len(problems) - args.limit} more")
+    return 1
+
+
+def cmd_backup(args):
+    """Copy what cannot be recomputed: the registry and the extracted text."""
+    load_env()
+    sys.path.insert(0, str(SCRIPTS))
+    import maintain
+
+    dest = args.to or os.environ.get("RAG_BACKUP_DIR")
+    if not dest:
+        sys.exit("where to? pass --to <dir>, or set RAG_BACKUP_DIR in .env")
+    out, size, note, pruned = maintain.backup(dest, args.with_index, args.keep)
+    print(f"\nwrote {out}  ({size / 2**30:.2f} GB)")
+    if note:
+        print(f"  ! {note}")
+    for name in pruned:
+        print(f"  pruned old backup {name}")
+    return 0
+
+
 def cmd_status(args):
     load_env()
     sys.path.insert(0, str(SCRIPTS))
@@ -675,6 +730,19 @@ def build_parser():
                        help="copy the embedded index into a Qdrant server")
     p.add_argument("--to", help="target server, e.g. http://localhost:6333")
     p.set_defaults(func=cmd_migrate)
+
+    p = sub.add_parser("verify", help="check registry, text, chunks and index agree")
+    p.add_argument("--deep", action="store_true",
+                   help="also count real points per document (slow)")
+    p.add_argument("--limit", type=int, default=20, help="problems to print")
+    p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("backup", help="back up the registry and extracted text")
+    p.add_argument("--to", help="destination directory")
+    p.add_argument("--with-index", action="store_true",
+                   help="also snapshot the Qdrant collection (large, saves a rebuild)")
+    p.add_argument("--keep", type=int, default=3, help="how many backups to retain")
+    p.set_defaults(func=cmd_backup)
 
     p = sub.add_parser("status", help="what is registered, built and indexed")
     p.set_defaults(func=cmd_status)

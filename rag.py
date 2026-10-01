@@ -164,6 +164,31 @@ def cmd_build(args):
     if not corpus.pdfs() and not list(corpus.TEXT_DIR.glob("*.txt")):
         sys.exit(f"no PDFs in {corpus.PDF_DIR.name}/ -- drop some in and run this again")
 
+    # Two builds at once race on corpus.json and contend for the GPU, and the
+    # loser's registry writes are silently lost. Now that the browse page can
+    # start one, the lock has to be real rather than a convention.
+    import jobs
+
+    held = jobs.build_running()
+    if held:
+        sys.exit(f"a build is already running (pid {held.get('pid')}, "
+                 f"{held.get('what')}, since {held.get('since')}).\n"
+                 f"Wait for it, or delete {jobs.LOCK} if it is stale.")
+    jobs.take_lock(os.getpid(), "cli build")
+    try:
+        return _build(args)
+    finally:
+        jobs.release_lock()
+
+
+def _build(args):
+    import chunk_corpus
+    import clean_corpus
+    import corpus
+    import extract_pdf
+    import ingest_qdrant
+    import scan_pdfs
+
     print("[1/5] scanning original/ for new documents")
     _, registered, failed, removed = scan_pdfs.run(rescan=args.rescan, quiet=True)
     for rel, err in failed:

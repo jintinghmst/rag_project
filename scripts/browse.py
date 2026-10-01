@@ -20,8 +20,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -172,6 +175,22 @@ tr:hover td{background:var(--chip)}
 .hit{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px}
 .cite{font-size:.78rem;color:var(--mut);margin-bottom:6px}
 .hit p{margin:0;font-size:.88rem;white-space:pre-wrap}
+#uploader{border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:16px;
+ background:var(--panel)}
+#drop{border:1.5px dashed var(--line);border-radius:10px;padding:22px;text-align:center;
+ cursor:pointer;color:var(--mut);font-size:.88rem}
+#drop:hover,#drop:focus,#drop.over{border-color:var(--acc);color:var(--fg);outline:none}
+#drop strong{color:var(--fg)}
+.hint{font-size:.78rem;color:var(--mut);margin-top:6px}
+.row{display:flex;gap:8px;margin-top:10px}
+.row input{flex:1 1 auto;min-width:0}
+.job{border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-top:9px;
+ font-size:.82rem;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.job .s{padding:1px 7px;border-radius:999px;background:var(--chip);font-size:.74rem}
+.job .s.running{background:var(--acc);color:#fff}
+.job .s.failed{background:#c0392b;color:#fff}
+.job .d{color:var(--mut);font-variant-numeric:tabular-nums}
+.warn{color:#b8860b;font-size:.8rem;margin-top:8px}
 .empty{color:var(--mut);padding:28px 0;text-align:center}
 @media(max-width:620px){.hide-s{display:none}}
 </style></head><body>
@@ -186,9 +205,26 @@ tr:hover td{background:var(--chip)}
       <option value="article">Papers</option><option value="issue">Unsplit issues</option>
     </select>
     <button id="go" class="primary" title="Search the text of the corpus">Search text</button>
+    <button id="addbtn" title="Add PDFs to the corpus">Add PDFs</button>
   </div>
 </div></header>
 <main>
+  <section id="uploader" hidden>
+    <div id="drop" tabindex="0" role="button"
+         aria-label="Choose PDFs, or drop them here">
+      <strong>Drop PDFs here</strong>, or click to choose
+      <div class="hint">Up to 50 files per upload, 900 MB each. They are extracted,
+        chunked and embedded automatically &mdash; a journal issue takes a while.</div>
+    </div>
+    <input id="picker" type="file" accept="application/pdf,.pdf" multiple hidden>
+    <div class="row">
+      <input id="label" placeholder="Optional label, e.g. IEEE TAP / 2027"
+             aria-label="Label for these documents">
+      <button id="send" class="primary" disabled>Upload</button>
+    </div>
+    <div id="chosen" class="hint"></div>
+    <div id="jobs"></div>
+  </section>
   <div class="stats" id="stats"></div>
   <div id="results"></div>
   <table id="table"><thead><tr>
@@ -282,10 +318,129 @@ async function search() {
 }
 $('#go').onclick = search;
 $('#q').addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
+
+// ---- adding documents -----------------------------------------------------
+let FILES = [];
+const fmt = b => b > 1048576 ? (b / 1048576).toFixed(0) + ' MB' : (b / 1024).toFixed(0) + ' KB';
+
+$('#addbtn').onclick = () => {
+  const u = $('#uploader');
+  u.hidden = !u.hidden;
+  if (!u.hidden) { poll(); $('#drop').focus(); }
+};
+
+function choose(list) {
+  FILES = [...list].filter(f => /\.pdf$/i.test(f.name));
+  const bytes = FILES.reduce((s, f) => s + f.size, 0);
+  $('#chosen').textContent = FILES.length
+    ? `${FILES.length} file(s), ${fmt(bytes)}`
+    : '';
+  $('#send').disabled = !FILES.length;
+}
+
+$('#picker').onchange = e => choose(e.target.files);
+$('#drop').onclick = () => $('#picker').click();
+$('#drop').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') $('#picker').click(); };
+for (const ev of ['dragenter', 'dragover']) $('#drop').addEventListener(ev, e => {
+  e.preventDefault(); $('#drop').classList.add('over');
+});
+for (const ev of ['dragleave', 'drop']) $('#drop').addEventListener(ev, e => {
+  e.preventDefault(); $('#drop').classList.remove('over');
+});
+$('#drop').addEventListener('drop', e => choose(e.dataTransfer.files));
+
+$('#send').onclick = async () => {
+  if (!FILES.length) return;
+  const fd = new FormData();
+  for (const f of FILES) fd.append('files', f, f.name);
+  fd.append('label', $('#label').value.trim());
+  $('#send').disabled = true;
+  $('#chosen').textContent = 'uploading…';
+  try {
+    const r = await fetch('/browse/api/upload', {method: 'POST', body: fd});
+    const d = await r.json();
+    const bits = [];
+    if (d.saved?.length) bits.push(`${d.saved.length} accepted`);
+    if (d.skipped?.length) bits.push(d.skipped.map(s => `${s.file}: ${s.why}`).join('; '));
+    if (d.error) bits.push(d.error);
+    $('#chosen').textContent = bits.join(' — ');
+    FILES = []; $('#picker').value = '';
+    poll();
+  } catch (e) {
+    $('#chosen').textContent = 'upload failed: ' + e.message;
+    $('#send').disabled = false;
+  }
+};
+
+let polling = null;
+async function poll() {
+  try {
+    const d = await (await fetch('/browse/api/jobs')).json();
+    const box = $('#jobs');
+    box.innerHTML = '';
+    if (d.external_build) {
+      const w = document.createElement('div');
+      w.className = 'warn';
+      w.textContent = 'A build started outside this page is running; an upload will '
+                    + 'wait for it rather than run alongside it.';
+      box.appendChild(w);
+    }
+    for (const j of (d.recent || []).slice(0, 5)) {
+      const el = document.createElement('div');
+      el.className = 'job';
+      const s = document.createElement('span');
+      s.className = 's ' + j.state; s.textContent = j.state;
+      const n = document.createElement('span');
+      n.textContent = j.files.length === 1 ? j.files[0] : `${j.files.length} files`;
+      const d2 = document.createElement('span');
+      d2.className = 'd';
+      d2.textContent = [j.stage, j.detail].filter(Boolean).join(' · ');
+      el.append(s, n, d2); box.appendChild(el);
+    }
+    const busy = d.running || d.queued;
+    // keep polling only while something is happening, and refresh the listing
+    // once it stops so newly embedded documents show as searchable
+    if (busy && !polling) polling = setInterval(poll, 4000);
+    if (!busy && polling) {
+      clearInterval(polling); polling = null;
+      fetch('/browse/api/corpus').then(r => r.json()).then(d2 => { ALL = d2.documents; apply(); });
+    }
+  } catch (e) { /* transient: the server may be mid-restart */ }
+}
 </script></body></html>"""
 
 
 # --------------------------------------------------------------------- routes
+
+# Upload limits. Not arbitrary: a whole journal issue runs to ~750 MB and a
+# textbook to ~20 MB, so the per-file ceiling has to clear the former without
+# accepting something that is obviously not a document. The rest exist because
+# this endpoint is reachable from the public internet behind one shared
+# passphrase -- without them, one request could fill the disk or queue days of
+# GPU work.
+MAX_FILE_BYTES = 900 * 1024 * 1024      # one journal issue, with headroom
+MAX_FILES = 50                           # per request
+MAX_REQUEST_BYTES = 4 * 1024 * 1024 * 1024
+DISK_HEADROOM = 3                        # need N x the upload free, for derived files
+UPLOAD_DIR = corpus.PDF_DIR / "uploads"
+PDF_MAGIC = b"%PDF-"
+
+
+def safe_name(raw):
+    """A filename that cannot escape the upload directory or collide blindly."""
+    name = Path(raw or "").name.replace("\\", "").replace("/", "")
+    name = re.sub(r"[^A-Za-z0-9 ._()\[\],&+-]", "_", name).strip(" ._")
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    return name[:180] or "upload.pdf"
+
+
+def free_bytes(path):
+    try:
+        return shutil.disk_usage(path).free
+    except Exception:
+        return None
+
 
 def register(server, search, cite, list_documents, quiet):
     """Mount the browse routes on the MCP server."""
@@ -355,3 +510,75 @@ def register(server, search, cite, list_documents, quiet):
             {"cite": cite(h), "text": h["text"][:1800], "book": h["book"],
              "score": round(float(h.get("rerank_score", h.get("score", 0))), 4)}
             for h in hits]})
+
+    @server.custom_route("/browse/api/upload", methods=["POST"])
+    async def api_upload(request):
+        if not authorised(request):
+            return JSONResponse({"error": "unauthorised"}, status_code=401)
+        import jobs
+
+        form = await request.form()
+        uploads = form.getlist("files")
+        label = (form.get("label") or "").strip()[:80]
+        if not uploads:
+            return JSONResponse({"error": "no files"}, status_code=400)
+        if len(uploads) > MAX_FILES:
+            return JSONResponse(
+                {"error": f"{len(uploads)} files; the limit is {MAX_FILES} per upload"},
+                status_code=413)
+
+        # Everything is checked before a single byte is written: a rejection
+        # halfway through would leave the corpus holding some of a batch, which
+        # is worse than refusing the batch.
+        saved, skipped, total = [], [], 0
+        target = UPLOAD_DIR / (label or datetime.now().strftime("%Y-%m"))
+        free = free_bytes(corpus.PDF_DIR if corpus.PDF_DIR.exists() else corpus.ROOT)
+
+        staged = []
+        for item in uploads:
+            name = safe_name(getattr(item, "filename", ""))
+            data = await item.read()
+            if not data.startswith(PDF_MAGIC):
+                skipped.append({"file": name, "why": "not a PDF"})
+                continue
+            if len(data) > MAX_FILE_BYTES:
+                skipped.append({"file": name,
+                                "why": f"{len(data) / 2**20:.0f} MB exceeds the "
+                                       f"{MAX_FILE_BYTES // 2**20} MB limit"})
+                continue
+            total += len(data)
+            if total > MAX_REQUEST_BYTES:
+                skipped.append({"file": name, "why": "request size limit reached"})
+                continue
+            staged.append((name, data))
+
+        if free is not None and total * DISK_HEADROOM > free:
+            return JSONResponse({
+                "error": f"not enough disk: {total / 2**30:.1f} GB of PDFs needs about "
+                         f"{total * DISK_HEADROOM / 2**30:.1f} GB once extracted and "
+                         f"chunked, and {free / 2**30:.1f} GB is free",
+            }, status_code=507)
+
+        target.mkdir(parents=True, exist_ok=True)
+        for name, data in staged:
+            path = target / name
+            if path.exists():
+                skipped.append({"file": name, "why": "already in the corpus"})
+                continue
+            path.write_bytes(data)
+            saved.append(str(path.relative_to(corpus.PDF_DIR)))
+
+        if not saved:
+            return JSONResponse({"saved": [], "skipped": skipped,
+                                 "error": "nothing was accepted"}, status_code=400)
+
+        job = jobs.submit(saved, label)
+        return JSONResponse({"saved": saved, "skipped": skipped, "job": job})
+
+    @server.custom_route("/browse/api/jobs", methods=["GET"])
+    async def api_jobs(request):
+        if not authorised(request):
+            return JSONResponse({"error": "unauthorised"}, status_code=401)
+        import jobs
+
+        return JSONResponse(jobs.status())
